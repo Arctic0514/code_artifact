@@ -1,0 +1,3477 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>楚漢演武 · 皇家西洋棋</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      height: 100dvh;
+      overflow: hidden;
+      background-color: #14101c;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+    #app {
+      width: 100%;
+      height: 100%;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      padding-left: env(safe-area-inset-left, 0px);
+      padding-right: env(safe-area-inset-right, 0px);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: radial-gradient(circle at center, #2d213f 0%, #120d1a 100%);
+    }
+    canvas {
+      display: block;
+      touch-action: none;
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 14px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.92), 0 0 20px rgba(235, 192, 96, 0.22);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  // 安全防護：確保 Canvas arc 與 ellipse 半徑永遠 >= 0.1，避免任何瀏覽器拋出 IndexSizeError
+  if (typeof CanvasRenderingContext2D !== 'undefined') {
+    const origArc = CanvasRenderingContext2D.prototype.arc;
+    CanvasRenderingContext2D.prototype.arc = function(x, y, r, sAngle, eAngle, counterclockwise) {
+      return origArc.call(this, x, y, Math.max(0.1, r || 0.1), sAngle, eAngle, counterclockwise);
+    };
+    if (CanvasRenderingContext2D.prototype.ellipse) {
+      const origEllipse = CanvasRenderingContext2D.prototype.ellipse;
+      CanvasRenderingContext2D.prototype.ellipse = function(x, y, rx, ry, rot, sAngle, eAngle, ccw) {
+        return origEllipse.call(this, x, y, Math.max(0.1, rx || 0.1), Math.max(0.1, ry || 0.1), rot, sAngle, eAngle, ccw);
+      };
+    }
+  }
+
+  // =========================================================================
+  // 1. Web Audio 皇家交響樂團與西洋棋音效合成引擎
+  // =========================================================================
+  class SoundEngine {
+    constructor() {
+      this.ctx = null;
+      this.muted = false;
+      this.unlocked = false;
+    }
+
+    unlock() {
+      if (!this.ctx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          this.ctx = new AudioCtx();
+        }
+      }
+      if (this.ctx && this.ctx.state === 'suspended') {
+        this.ctx.resume();
+      }
+      this.unlocked = true;
+    }
+
+    toggleMute() {
+      this.muted = !this.muted;
+      return this.muted;
+    }
+
+    playTone(freq, type, duration, vol = 0.2, slideFreq = null, delay = 0) {
+      if (this.muted || !this.ctx) return;
+      const now = this.ctx.currentTime + delay;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, now);
+      if (slideFreq) {
+        osc.frequency.exponentialRampToValueAtTime(Math.max(20, slideFreq), now + duration);
+      }
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(vol, now + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + duration + 0.02);
+    }
+
+    playNoise(duration, vol = 0.25, filterFreq = 1000, delay = 0) {
+      if (this.muted || !this.ctx) return;
+      const now = this.ctx.currentTime + delay;
+      const bufferSize = Math.floor(this.ctx.sampleRate * duration);
+      const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = buffer;
+
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(filterFreq, now);
+      filter.frequency.exponentialRampToValueAtTime(100, now + duration);
+
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(vol, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.ctx.destination);
+      noise.start(now);
+      noise.stop(now + duration + 0.02);
+    }
+
+    playSelect() {
+      this.playTone(587.33, 'triangle', 0.11, 0.18, 880);
+    }
+
+    playCancel() {
+      this.playTone(440, 'triangle', 0.1, 0.14, 310);
+    }
+
+    playInvalid() {
+      this.playTone(190, 'sawtooth', 0.16, 0.2, 130);
+    }
+
+    playMove() {
+      this.playTone(230, 'sine', 0.09, 0.32, 80);
+      this.playNoise(0.05, 0.15, 950);
+    }
+
+    playPromote() {
+      const notes = [523.25, 659.25, 783.99, 1046.5];
+      notes.forEach((f, idx) => {
+        this.playTone(f, 'triangle', 0.22, 0.24, null, idx * 0.08);
+      });
+    }
+
+    playBattle(pieceType) {
+      this.playTone(659.25, 'triangle', 0.15, 0.2, 880, 0);
+      switch (pieceType) {
+        case 'Q':
+          this.playNoise(0.15, 0.16, 3200, 0.05);
+          this.playNoise(0.55, 0.45, 620, 0.22);
+          this.playTone(135, 'sawtooth', 0.45, 0.38, 30, 0.22);
+          break;
+        case 'R':
+          this.playTone(120, 'sawtooth', 0.25, 0.28, 220, 0.02);
+          this.playNoise(0.35, 0.38, 1300, 0.22);
+          this.playTone(280, 'triangle', 0.38, 0.32, 920, 0.25);
+          break;
+        case 'N':
+          this.playTone(540, 'sawtooth', 0.18, 0.22, 340, 0.04);
+          this.playNoise(0.28, 0.32, 1600, 0.22);
+          this.playTone(180, 'sine', 0.3, 0.36, 48, 0.22);
+          break;
+        case 'B':
+          this.playTone(1050, 'sawtooth', 0.12, 0.22, 1550, 0.08);
+          this.playTone(1320, 'triangle', 0.18, 0.24, 580, 0.18);
+          this.playNoise(0.2, 0.24, 3000, 0.2);
+          break;
+        case 'K':
+          this.playTone(210, 'sawtooth', 0.4, 0.35, 75, 0.06);
+          this.playTone(420, 'square', 0.32, 0.24, 95, 0.12);
+          this.playNoise(0.35, 0.3, 1100, 0.2);
+          break;
+        default:
+          this.playTone(390, 'square', 0.12, 0.22, 780, 0.06);
+          this.playNoise(0.22, 0.28, 2100, 0.16);
+          break;
+      }
+    }
+
+    playCheck() {
+      const notes = [587.33, 880, 587.33, 987.77];
+      notes.forEach((f, idx) => {
+        this.playTone(f, 'square', 0.14, 0.22, f * 0.96, idx * 0.11);
+      });
+    }
+
+    playWin() {
+      const melody = [523.25, 659.25, 783.99, 1046.5, 783.99, 1046.5];
+      const times = [0, 0.12, 0.24, 0.38, 0.55, 0.7];
+      melody.forEach((f, i) => {
+        this.playTone(f, 'triangle', 0.28, 0.26, null, times[i]);
+      });
+    }
+
+    playLose() {
+      const melody = [440, 392, 349.23, 293.66, 220];
+      melody.forEach((f, i) => {
+        this.playTone(f, 'sawtooth', 0.28, 0.18, f * 0.92, i * 0.16);
+      });
+    }
+  }
+
+  const sfx = new SoundEngine();
+
+  // =========================================================================
+  // 2. FIDE 國際象棋核心規則與皇家樂團庫洛米兵種設定
+  // =========================================================================
+  const SIDE_RED = 'R';   // 白方 (聖光白金樂團，先手)
+  const SIDE_BLACK = 'B'; // 黑方 (暗夜紫黑樂團，後手)
+  const BOARD_ROWS = 8;
+  const BOARD_COLS = 8;
+
+  const PIECE_NAMES = {
+    K: '國王',
+    Q: '皇后',
+    R: '城堡',
+    B: '主教',
+    N: '騎士',
+    P: '士兵'
+  };
+
+  const PIECE_LABELS = {
+    R: { K: '國王', Q: '皇后', R: '城堡', B: '主教', N: '騎士', P: '士兵' },
+    B: { K: '國王', Q: '皇后', R: '城堡', B: '主教', N: '騎士', P: '士兵' }
+  };
+
+  const PIECE_CHESS_ICONS = {
+    K: '♚', Q: '♛', R: '♜', B: '♝', N: '♞', P: '♟'
+  };
+
+  const PIECE_TITLES = {
+    K: '皇家樂團小提琴 · 國王',
+    Q: '巴洛克金冠權杖 · 皇后',
+    R: '皇家城垛戰鼓 · 城堡',
+    B: '白羽貝雷手風琴 · 主教',
+    N: '高筒軍帽行軍鼓 · 騎士',
+    P: '皇家羽飾長笛 · 士兵'
+  };
+
+  const PIECE_VALUES = {
+    K: 20000, Q: 900, R: 500, B: 330, N: 320, P: 100
+  };
+
+  const BATTLE_MOVES = {
+    K: ['皇家小提琴・帝王鎮魂曲！', '神聖十字冠・黃金交響波！'],
+    Q: ['魔導權杖・闇炎狂想曲！', '巴洛克后冠・星耀轟炸！'],
+    R: ['城垛塔樓・萬鈞巨石泰山壓頂！', '皇家要塞・天降巨岩壓扁！'],
+    B: ['白羽手風琴・十字音刃斬！', '哥德主教・華麗和弦裂空！'],
+    N: ['皇家鐵騎・雙馬腿尥蹶子踢飛！', '天馬神蹄・迴旋後踢破空！'],
+    P: ['黃金長笛・穿雲高音刺！', '先鋒樂手・破陣進行曲！']
+  };
+
+  const PST = {
+    P: [
+      [  0,  0,  0,  0,  0,  0,  0,  0],
+      [ 50, 50, 50, 50, 50, 50, 50, 50],
+      [ 10, 10, 20, 30, 30, 20, 10, 10],
+      [  5,  5, 10, 25, 25, 10,  5,  5],
+      [  0,  0,  0, 20, 20,  0,  0,  0],
+      [  5, -5,-10,  0,  0,-10, -5,  5],
+      [  5, 10, 10,-20,-20, 10, 10,  5],
+      [  0,  0,  0,  0,  0,  0,  0,  0]
+    ],
+    N: [
+      [-50,-40,-30,-30,-30,-30,-40,-50],
+      [-40,-20,  0,  0,  0,  0,-20,-40],
+      [-30,  0, 10, 15, 15, 10,  0,-30],
+      [-30,  5, 15, 20, 20, 15,  5,-30],
+      [-30,  0, 15, 20, 20, 15,  0,-30],
+      [-30,  5, 10, 15, 15, 10,  5,-30],
+      [-40,-20,  0,  5,  5,  0,-20,-40],
+      [-50,-40,-30,-30,-30,-30,-40,-50]
+    ],
+    B: [
+      [-20,-10,-10,-10,-10,-10,-10,-20],
+      [-10,  0,  0,  0,  0,  0,  0,-10],
+      [-10,  0,  5, 10, 10,  5,  0,-10],
+      [-10,  5,  5, 10, 10,  5,  5,-10],
+      [-10,  0, 10, 10, 10, 10,  0,-10],
+      [-10, 10, 10, 10, 10, 10, 10,-10],
+      [-10,  5,  0,  0,  0,  0,  5,-10],
+      [-20,-10,-10,-10,-10,-10,-10,-20]
+    ],
+    R: [
+      [  0,  0,  0,  0,  0,  0,  0,  0],
+      [  5, 10, 10, 10, 10, 10, 10,  5],
+      [ -5,  0,  0,  0,  0,  0,  0, -5],
+      [ -5,  0,  0,  0,  0,  0,  0, -5],
+      [ -5,  0,  0,  0,  0,  0,  0, -5],
+      [ -5,  0,  0,  0,  0,  0,  0, -5],
+      [ -5,  0,  0,  0,  0,  0,  0, -5],
+      [  0,  0,  0,  5,  5,  0,  0,  0]
+    ],
+    Q: [
+      [-20,-10,-10, -5, -5,-10,-10,-20],
+      [-10,  0,  0,  0,  0,  0,  0,-10],
+      [-10,  0,  5,  5,  5,  5,  0,-10],
+      [ -5,  0,  5,  5,  5,  5,  0, -5],
+      [  0,  0,  5,  5,  5,  5,  0, -5],
+      [-10,  5,  5,  5,  5,  5,  0,-10],
+      [-10,  0,  5,  0,  0,  0,  0,-10],
+      [-20,-10,-10, -5, -5,-10,-10,-20]
+    ],
+    K: [
+      [-30,-40,-40,-50,-50,-40,-40,-30],
+      [-30,-40,-40,-50,-50,-40,-40,-30],
+      [-30,-40,-40,-50,-50,-40,-40,-30],
+      [-30,-40,-40,-50,-50,-40,-40,-30],
+      [-20,-30,-30,-40,-40,-30,-30,-20],
+      [-10,-20,-20,-20,-20,-20,-20,-10],
+      [ 20, 20,  0,  0,  0,  0, 20, 20],
+      [ 20, 30, 10,  0,  0, 10, 30, 20]
+    ]
+  };
+
+  function createInitialBoard() {
+    const b = Array.from({ length: BOARD_ROWS }, () => Array(BOARD_COLS).fill(null));
+    const backRank = ['R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R'];
+    for (let c = 0; c < BOARD_COLS; c++) {
+      b[0][c] = { side: SIDE_BLACK, type: backRank[c], moved: false };
+      b[1][c] = { side: SIDE_BLACK, type: 'P', moved: false };
+      b[6][c] = { side: SIDE_RED, type: 'P', moved: false };
+      b[7][c] = { side: SIDE_RED, type: backRank[c], moved: false };
+    }
+    return b;
+  }
+
+  function cloneBoard(board) {
+    return board.map(row => row.map(cell => (cell ? { ...cell } : null)));
+  }
+
+  function inBounds(r, c) {
+    return r >= 0 && r < BOARD_ROWS && c >= 0 && c < BOARD_COLS;
+  }
+
+  function getPseudoMoves(board, r, c, lastMove = null, includeCastling = false) {
+    const p = board[r][c];
+    if (!p) return [];
+    const moves = [];
+    const { side, type } = p;
+
+    const addSlideMoves = (dirs) => {
+      for (const [dr, dc] of dirs) {
+        let nr = r + dr, nc = c + dc;
+        while (inBounds(nr, nc)) {
+          const target = board[nr][nc];
+          if (!target) {
+            moves.push({ fr: r, fc: c, tr: nr, tc: nc });
+          } else {
+            if (target.side !== side) {
+              moves.push({ fr: r, fc: c, tr: nr, tc: nc });
+            }
+            break;
+          }
+          nr += dr;
+          nc += dc;
+        }
+      }
+    };
+
+    if (type === 'P') {
+      const dir = side === SIDE_RED ? -1 : 1;
+      const startRow = side === SIDE_RED ? 6 : 1;
+      const promoRow = side === SIDE_RED ? 0 : 7;
+
+      const nr = r + dir;
+      if (inBounds(nr, c) && !board[nr][c]) {
+        const isPromo = (nr === promoRow);
+        moves.push({
+          fr: r, fc: c, tr: nr, tc: c,
+          needsPromotionChoice: isPromo,
+          promotion: isPromo ? 'Q' : null
+        });
+
+        const nr2 = r + dir * 2;
+        if (r === startRow && inBounds(nr2, c) && !board[nr2][c]) {
+          moves.push({ fr: r, fc: c, tr: nr2, tc: c, isDoublePawn: true });
+        }
+      }
+
+      for (const dc of [-1, 1]) {
+        const nc = c + dc;
+        if (inBounds(nr, nc)) {
+          const target = board[nr][nc];
+          if (target && target.side !== side) {
+            const isPromo = (nr === promoRow);
+            moves.push({
+              fr: r, fc: c, tr: nr, tc: nc,
+              needsPromotionChoice: isPromo,
+              promotion: isPromo ? 'Q' : null
+            });
+          }
+        }
+      }
+
+      // FIDE 吃過路兵 (En Passant)
+      if (lastMove && lastMove.isDoublePawn && lastMove.tr === r && Math.abs(lastMove.tc - c) === 1) {
+        const epTarget = board[lastMove.tr][lastMove.tc];
+        if (epTarget && epTarget.side !== side && epTarget.type === 'P') {
+          moves.push({
+            fr: r, fc: c,
+            tr: r + dir, tc: lastMove.tc,
+            isEnPassant: true,
+            epCapturePos: { r: lastMove.tr, c: lastMove.tc }
+          });
+        }
+      }
+    } else if (type === 'N') {
+      const steps = [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]];
+      for (const [dr, dc] of steps) {
+        const nr = r + dr, nc = c + dc;
+        if (inBounds(nr, nc)) {
+          const target = board[nr][nc];
+          if (!target || target.side !== side) {
+            moves.push({ fr: r, fc: c, tr: nr, tc: nc });
+          }
+        }
+      }
+    } else if (type === 'B') {
+      addSlideMoves([[1, 1], [1, -1], [-1, 1], [-1, -1]]);
+    } else if (type === 'R') {
+      addSlideMoves([[1, 0], [-1, 0], [0, 1], [0, -1]]);
+    } else if (type === 'Q') {
+      addSlideMoves([[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]);
+    } else if (type === 'K') {
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+      for (const [dr, dc] of dirs) {
+        const nr = r + dr, nc = c + dc;
+        if (inBounds(nr, nc)) {
+          const target = board[nr][nc];
+          if (!target || target.side !== side) {
+            moves.push({ fr: r, fc: c, tr: nr, tc: nc });
+          }
+        }
+      }
+
+      // FIDE 王車易位 (Castling)
+      if (includeCastling && !p.moved && !isKingInCheck(board, side)) {
+        const homeRow = side === SIDE_RED ? 7 : 0;
+        if (r === homeRow && c === 4) {
+          const enemy = side === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+          // 短易位 (O-O)
+          const kRook = board[homeRow][7];
+          if (kRook && kRook.side === side && kRook.type === 'R' && !kRook.moved) {
+            if (!board[homeRow][5] && !board[homeRow][6]) {
+              if (!isSquareAttacked(board, homeRow, 5, enemy) && !isSquareAttacked(board, homeRow, 6, enemy)) {
+                moves.push({
+                  fr: homeRow, fc: 4, tr: homeRow, tc: 6,
+                  isCastle: true,
+                  castleSide: 'K',
+                  rookFrom: { r: homeRow, c: 7 },
+                  rookTo: { r: homeRow, c: 5 }
+                });
+              }
+            }
+          }
+          // 長易位 (O-O-O)
+          const qRook = board[homeRow][0];
+          if (qRook && qRook.side === side && qRook.type === 'R' && !qRook.moved) {
+            if (!board[homeRow][1] && !board[homeRow][2] && !board[homeRow][3]) {
+              if (!isSquareAttacked(board, homeRow, 3, enemy) && !isSquareAttacked(board, homeRow, 2, enemy)) {
+                moves.push({
+                  fr: homeRow, fc: 4, tr: homeRow, tc: 2,
+                  isCastle: true,
+                  castleSide: 'Q',
+                  rookFrom: { r: homeRow, c: 0 },
+                  rookTo: { r: homeRow, c: 3 }
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return moves;
+  }
+
+  function findKing(board, side) {
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = board[r][c];
+        if (p && p.side === side && p.type === 'K') {
+          return { r, c };
+        }
+      }
+    }
+    return null;
+  }
+
+  function isSquareAttacked(board, targetR, targetC, attackerSide) {
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = board[r][c];
+        if (!p || p.side !== attackerSide) continue;
+        if (p.type === 'P') {
+          const dir = attackerSide === SIDE_RED ? -1 : 1;
+          if (r + dir === targetR && Math.abs(c - targetC) === 1) {
+            return true;
+          }
+        } else {
+          const pmoves = getPseudoMoves(board, r, c, null, false);
+          for (const m of pmoves) {
+            if (m.tr === targetR && m.tc === targetC) return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  function isKingInCheck(board, side) {
+    const king = findKing(board, side);
+    if (!king) return true;
+    const enemy = side === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+    return isSquareAttacked(board, king.r, king.c, enemy);
+  }
+
+  function applyMoveTemp(board, move) {
+    const moving = board[move.fr][move.fc];
+    let captured = board[move.tr][move.tc];
+    let epCaptured = null;
+
+    if (move.isEnPassant && move.epCapturePos) {
+      epCaptured = board[move.epCapturePos.r][move.epCapturePos.c];
+      board[move.epCapturePos.r][move.epCapturePos.c] = null;
+    }
+
+    board[move.tr][move.tc] = moving;
+    board[move.fr][move.fc] = null;
+
+    let savedRook = null;
+    if (move.isCastle && move.rookFrom && move.rookTo) {
+      savedRook = board[move.rookFrom.r][move.rookFrom.c];
+      board[move.rookTo.r][move.rookTo.c] = savedRook;
+      board[move.rookFrom.r][move.rookFrom.c] = null;
+    }
+
+    const oldType = moving ? moving.type : null;
+    if (moving && move.promotion) {
+      moving.type = move.promotion;
+    }
+
+    return { captured, epCaptured, savedRook, oldType };
+  }
+
+  function undoMoveTemp(board, move, snap) {
+    const moving = board[move.tr][move.tc];
+    if (moving && snap.oldType) {
+      moving.type = snap.oldType;
+    }
+    board[move.fr][move.fc] = moving;
+    board[move.tr][move.tc] = snap.captured;
+
+    if (move.isEnPassant && move.epCapturePos) {
+      board[move.epCapturePos.r][move.epCapturePos.c] = snap.epCaptured;
+    }
+    if (move.isCastle && move.rookFrom && move.rookTo) {
+      board[move.rookFrom.r][move.rookFrom.c] = snap.savedRook;
+      board[move.rookTo.r][move.rookTo.c] = null;
+    }
+  }
+
+  function getLegalMovesForPiece(board, r, c, lastMove = null) {
+    const p = board[r][c];
+    if (!p) return [];
+    const pseudo = getPseudoMoves(board, r, c, lastMove, true);
+    const legal = [];
+    for (const m of pseudo) {
+      const snap = applyMoveTemp(board, m);
+      if (!isKingInCheck(board, p.side)) {
+        legal.push(m);
+      }
+      undoMoveTemp(board, m, snap);
+    }
+    return legal;
+  }
+
+  function analyzeKingExposure(board, fr, fc, tr, tc) {
+    const p = board[fr][fc];
+    if (!p) return null;
+    const side = p.side;
+    const enemy = side === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+    const snap = applyMoveTemp(board, { fr, fc, tr, tc });
+
+    let reason = null;
+    const king = findKing(board, side);
+    if (king) {
+      for (let r = 0; r < BOARD_ROWS && !reason; r++) {
+        for (let c = 0; c < BOARD_COLS && !reason; c++) {
+          const ep = board[r][c];
+          if (ep && ep.side === enemy) {
+            const pmoves = getPseudoMoves(board, r, c, null, false);
+            for (const m of pmoves) {
+              if (m.tr === king.r && m.tc === king.c) {
+                const eName = PIECE_NAMES[ep.type];
+                reason = {
+                  text: `⚠️ FIDE 護王禁著：移開後敵方【${eName}】將直接將軍國王！`,
+                  threatPos: { r, c },
+                  kingPos: king
+                };
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    undoMoveTemp(board, { fr, fc, tr, tc }, snap);
+    return reason;
+  }
+
+  function getPinnedBlockedMoves(board, r, c) {
+    const p = board[r][c];
+    if (!p) return [];
+    const pseudo = getPseudoMoves(board, r, c, state.lastMove, false);
+    const blocked = [];
+    for (const m of pseudo) {
+      const exposure = analyzeKingExposure(board, r, c, m.tr, m.tc);
+      if (exposure) {
+        blocked.push({ ...m, exposure });
+      }
+    }
+    return blocked;
+  }
+
+  function getAllLegalMoves(board, side, lastMove = null) {
+    const all = [];
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = board[r][c];
+        if (p && p.side === side) {
+          const pm = getLegalMovesForPiece(board, r, c, lastMove);
+          for (const m of pm) all.push(m);
+        }
+      }
+    }
+    return all;
+  }
+
+  function getPositionKey(board, turn, lastMove) {
+    let key = turn + ':';
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = board[r][c];
+        key += p ? `${p.side}${p.type}${p.moved ? 1 : 0}` : '.';
+      }
+    }
+    if (lastMove && lastMove.isDoublePawn) {
+      key += `:ep${lastMove.tc}`;
+    }
+    return key;
+  }
+
+  function isInsufficientMaterial(board) {
+    const pieces = [];
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = board[r][c];
+        if (p && p.type !== 'K') {
+          pieces.push({ ...p, r, c });
+        }
+      }
+    }
+    if (pieces.length === 0) return true; // K vs K
+    if (pieces.length === 1 && (pieces[0].type === 'N' || pieces[0].type === 'B')) return true; // K+N vs K 或 K+B vs K
+    if (pieces.length === 2 && pieces[0].type === 'B' && pieces[1].type === 'B' && pieces[0].side !== pieces[1].side) {
+      const color0 = (pieces[0].r + pieces[0].c) % 2;
+      const color1 = (pieces[1].r + pieces[1].c) % 2;
+      if (color0 === color1) return true; // 雙方同色格單主教
+    }
+    return false;
+  }
+
+  function toAlgebraicNotation(move, movingPiece, capturedPiece, isCheck, isMate) {
+    if (move.isCastle) {
+      const base = move.castleSide === 'K' ? 'O-O' : 'O-O-O';
+      return base + (isMate ? '#' : (isCheck ? '+' : ''));
+    }
+    const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    const dest = `${files[move.tc]}${8 - move.tr}`;
+    let san = '';
+    if (movingPiece.type === 'P') {
+      if (capturedPiece || move.isEnPassant) {
+        san = `${files[move.fc]}x${dest}`;
+      } else {
+        san = dest;
+      }
+      if (move.promotion) {
+        san += `=${move.promotion}`;
+      }
+    } else {
+      san = movingPiece.type + (capturedPiece ? 'x' : '') + dest;
+    }
+    if (isMate) san += '#';
+    else if (isCheck) san += '+';
+    return san;
+  }
+
+  function formatChessClock(seconds) {
+    const s = Math.max(0, Math.ceil(seconds));
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+  }
+
+  // =========================================================================
+  // 3. 單機 AI 對手 (Alpha-Beta 剪枝搜尋)
+  // =========================================================================
+  function evaluateBoard(board) {
+    let score = 0;
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = board[r][c];
+        if (!p) continue;
+        let val = PIECE_VALUES[p.type] || 0;
+        const pstTable = PST[p.type];
+        if (pstTable) {
+          const pr = p.side === SIDE_RED ? r : (7 - r);
+          val += pstTable[pr][c];
+        }
+        score += (p.side === SIDE_BLACK ? val : -val);
+      }
+    }
+    return score;
+  }
+
+  function getBestAIMove(board, difficulty) {
+    const moves = getAllLegalMoves(board, SIDE_BLACK, state.lastMove);
+    if (moves.length === 0) return null;
+
+    moves.sort((a, b) => {
+      const ca = board[a.tr][a.tc] ? PIECE_VALUES[board[a.tr][a.tc].type] : 0;
+      const cb = board[b.tr][b.tc] ? PIECE_VALUES[board[b.tr][b.tc].type] : 0;
+      return cb - ca;
+    });
+
+    const depth = difficulty === 'hard' ? 3 : 2;
+    let bestScore = -Infinity;
+    let bestMoves = [];
+
+    for (const m of moves) {
+      if (m.needsPromotionChoice) m.promotion = 'Q';
+      const snap = applyMoveTemp(board, m);
+      let sc = minimax(board, depth - 1, -Infinity, Infinity, false, m);
+      undoMoveTemp(board, m, snap);
+
+      if (difficulty === 'normal') {
+        sc += (Math.random() - 0.5) * 35;
+      } else {
+        sc += (Math.random() - 0.5) * 6;
+      }
+
+      if (sc > bestScore) {
+        bestScore = sc;
+        bestMoves = [m];
+      } else if (Math.abs(sc - bestScore) < 1) {
+        bestMoves.push(m);
+      }
+    }
+    return bestMoves[Math.floor(Math.random() * bestMoves.length)];
+  }
+
+  function minimax(board, depth, alpha, beta, isMaximizing, lastMove) {
+    if (depth === 0) {
+      return evaluateBoard(board);
+    }
+    const side = isMaximizing ? SIDE_BLACK : SIDE_RED;
+    const moves = getAllLegalMoves(board, side, lastMove);
+    if (moves.length === 0) {
+      if (isKingInCheck(board, side)) {
+        return isMaximizing ? -20000 - depth * 100 : 20000 + depth * 100;
+      }
+      return 0;
+    }
+
+    moves.sort((a, b) => {
+      const ca = board[a.tr][a.tc] ? 1 : 0;
+      const cb = board[b.tr][b.tc] ? 1 : 0;
+      return cb - ca;
+    });
+
+    if (isMaximizing) {
+      let maxEval = -Infinity;
+      for (const m of moves) {
+        if (m.needsPromotionChoice) m.promotion = 'Q';
+        const snap = applyMoveTemp(board, m);
+        const ev = minimax(board, depth - 1, alpha, beta, false, m);
+        undoMoveTemp(board, m, snap);
+        if (ev > maxEval) maxEval = ev;
+        if (ev > alpha) alpha = ev;
+        if (beta <= alpha) break;
+      }
+      return maxEval;
+    } else {
+      let minEval = Infinity;
+      for (const m of moves) {
+        if (m.needsPromotionChoice) m.promotion = 'Q';
+        const snap = applyMoveTemp(board, m);
+        const ev = minimax(board, depth - 1, alpha, beta, true, m);
+        undoMoveTemp(board, m, snap);
+        if (ev < minEval) minEval = ev;
+        if (ev < beta) beta = ev;
+        if (beta <= alpha) break;
+      }
+      return minEval;
+    }
+  }
+
+  // =========================================================================
+  // 4. 遊戲狀態與 8x8 奢華黑金棋盤自適應排版 (支援 iPhone 13 與 iPhone 17 Pro Max)
+  // =========================================================================
+  const appEl = document.getElementById('app');
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const LOGICAL_W = 540;
+  const LOGICAL_H = 960;
+  let dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+  function resizeCanvas() {
+    // 優先使用 visualViewport 與扣除 Safe Area 後的實際可用空間，完美適配 iPhone 13 與 iPhone 17 Pro Max
+    const cs = window.getComputedStyle(appEl);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const vpW = (window.visualViewport ? window.visualViewport.width : window.innerWidth) - padX;
+    const vpH = (window.visualViewport ? window.visualViewport.height : window.innerHeight) - padY;
+
+    const winW = Math.max(280, vpW);
+    const winH = Math.max(480, vpH);
+    const targetRatio = LOGICAL_W / LOGICAL_H;
+    const winRatio = winW / winH;
+
+    let displayW, displayH;
+    if (winRatio < targetRatio) {
+      displayW = winW;
+      displayH = winW / targetRatio;
+    } else {
+      displayH = winH;
+      displayW = winH * targetRatio;
+    }
+
+    canvas.style.width = `${Math.floor(displayW)}px`;
+    canvas.style.height = `${Math.floor(displayH)}px`;
+    // 支援 iPhone Retina 3x 高解析度渲染，字體與 3D 庫洛米棋子在 iPhone 17 Pro Max 上極致銳利
+    dpr = Math.min(window.devicePixelRatio || 1, 3);
+    canvas.width = Math.round(LOGICAL_W * dpr);
+    canvas.height = Math.round(LOGICAL_H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('orientationchange', () => setTimeout(resizeCanvas, 120));
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', resizeCanvas);
+  }
+  resizeCanvas();
+
+  // 8x8 西洋棋格配置：每格 57x57，總寬高 456x456
+  const CELL_SIZE = 57;
+  const BOARD_W = CELL_SIZE * BOARD_COLS; // 456
+  const BOARD_H = CELL_SIZE * BOARD_ROWS; // 456
+  const BOARD_LEFT = (LOGICAL_W - BOARD_W) / 2; // 42
+  const BOARD_TOP = 204;
+
+  // 取得第 (r, c) 格的中心像素座標
+  function gridToPixel(r, c) {
+    return {
+      x: BOARD_LEFT + (c + 0.5) * CELL_SIZE,
+      y: BOARD_TOP + (r + 0.5) * CELL_SIZE
+    };
+  }
+
+  function pixelToGrid(x, y) {
+    let bestCell = null;
+    let bestScore = Infinity;
+
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const pos = gridToPixel(r, c);
+        const piece = state.board[r][c];
+        const isLegalTarget = state.selected && state.legalMoves.some(m => m.tr === r && m.tc === c);
+        const isFriendly = piece && piece.side === state.turn;
+        const isEnemy = piece && piece.side !== state.turn;
+
+        // 考慮高聳 3D 獎盃底座與尖耳皇冠的重心偏移 (-6px)
+        const centerY = piece ? (pos.y - 6) : pos.y;
+        const dx = x - pos.x;
+        const dy = y - centerY;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist <= CELL_SIZE * 0.68) {
+          let score = dist;
+          if (isLegalTarget && dist <= 28) {
+            score -= 16;
+          } else if (isFriendly) {
+            score -= 15;
+          } else if (isEnemy && !isLegalTarget) {
+            score += 28;
+          } else if (!piece && !isLegalTarget) {
+            score += 8;
+          }
+
+          if (score < bestScore) {
+            bestScore = score;
+            bestCell = { r, c };
+          }
+        }
+      }
+    }
+    return bestCell;
+  }
+
+  const state = {
+    screen: 'MENU',
+    mode: 'AI',
+    difficulty: 'normal',
+    board: createInitialBoard(),
+    turn: SIDE_RED,
+    selected: null,
+    legalMoves: [],
+    blockedMoves: [],
+    warningLine: null,
+    lastMove: null,
+    history: [],
+    score: 0,
+    bestScore: (() => {
+      try { return parseInt(localStorage.getItem('kuromi_chess_best') || '0', 10) || 0; }
+      catch (e) { return 0; }
+    })(),
+    turnCount: 1,
+    capturedByRed: [],
+    capturedByBlack: [],
+    inCheckSide: null,
+    aiThinking: false,
+    aiTimer: 0,
+    winner: null,
+    winReason: '',
+    moveAnim: null,
+    battleAnim: null,
+    particles: [],
+    ashParticles: [],
+    floatingTexts: [],
+    screenShake: 0,
+    uiButtons: [],
+    animClock: 0,
+    // FIDE 競賽規範擴充狀態
+    touchPieceRule: false,      // FIDE 摸子走子規則 (Touch-Move Rule)
+    lockedPiecePos: null,       // 觸摸後有合法步必須走的棋子座標
+    halfMoveClock: 0,           // FIDE 50步規則半回合計數 (達 100 判和)
+    positionCounts: {},         // FIDE 三次重複局面紀錄表
+    whiteTime: 600,             // FIDE 10分鐘快棋計時 (秒)
+    blackTime: 600,
+    moveNotations: [],          // FIDE SAN 代數記譜紀錄
+    pendingPromotion: null      // 士兵底線升變四選一彈窗 (Q/R/B/N)
+  };
+
+  function resetGame(mode = state.mode, difficulty = state.difficulty) {
+    state.mode = mode;
+    state.difficulty = difficulty;
+    state.board = createInitialBoard();
+    state.turn = SIDE_RED;
+    state.selected = null;
+    state.legalMoves = [];
+    state.blockedMoves = [];
+    state.warningLine = null;
+    state.lastMove = null;
+    state.history = [];
+    state.score = 0;
+    state.turnCount = 1;
+    state.capturedByRed = [];
+    state.capturedByBlack = [];
+    state.inCheckSide = null;
+    state.aiThinking = false;
+    state.aiTimer = 0;
+    state.winner = null;
+    state.winReason = '';
+    state.moveAnim = null;
+    state.battleAnim = null;
+    state.particles = [];
+    state.ashParticles = [];
+    state.floatingTexts = [];
+    state.screenShake = 0;
+    state.lockedPiecePos = null;
+    state.halfMoveClock = 0;
+    state.positionCounts = {};
+    const initKey = getPositionKey(state.board, state.turn, null);
+    state.positionCounts[initKey] = 1;
+    state.whiteTime = 600;
+    state.blackTime = 600;
+    state.moveNotations = [];
+    state.pendingPromotion = null;
+    state.screen = 'PLAYING';
+  }
+
+  function spawnParticles(x, y, color, count = 22, speed = 5) {
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.5;
+      const spd = speed * (0.4 + Math.random() * 0.9);
+      state.particles.push({
+        x, y,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd - 1.5,
+        size: 3 + Math.random() * 5,
+        color,
+        life: 1.0,
+        decay: 0.022 + Math.random() * 0.02
+      });
+    }
+  }
+
+  function spawnAshParticles(x, y, count = 55) {
+    for (let i = 0; i < count; i++) {
+      state.ashParticles.push({
+        x: x + (Math.random() - 0.5) * 34,
+        y: y + (Math.random() - 0.5) * 34,
+        vx: (Math.random() - 0.35) * 1.6,
+        vy: -0.9 - Math.random() * 2.2,
+        size: 2 + Math.random() * 3.8,
+        shade: Math.floor(25 + Math.random() * 65),
+        wobble: Math.random() * Math.PI * 2,
+        life: 1.0,
+        decay: 0.014 + Math.random() * 0.012
+      });
+    }
+  }
+
+  function spawnFloatingText(x, y, text, color = '#ffd86b', size = 24) {
+    state.floatingTexts.push({
+      x, y,
+      text,
+      color,
+      size,
+      vy: -1.4,
+      life: 1.0,
+      decay: 0.015
+    });
+  }
+
+  function executeMove(move) {
+    const movingPiece = state.board[move.fr][move.fc];
+    if (!movingPiece) return;
+
+    let targetPiece = state.board[move.tr][move.tc];
+    if (move.isEnPassant && move.epCapturePos) {
+      targetPiece = state.board[move.epCapturePos.r][move.epCapturePos.c];
+    }
+
+    state.history.push({
+      board: cloneBoard(state.board),
+      turn: state.turn,
+      lastMove: state.lastMove ? { ...state.lastMove } : null,
+      score: state.score,
+      turnCount: state.turnCount,
+      capturedByRed: [...state.capturedByRed],
+      capturedByBlack: [...state.capturedByBlack],
+      halfMoveClock: state.halfMoveClock,
+      positionCounts: { ...state.positionCounts },
+      whiteTime: state.whiteTime,
+      blackTime: state.blackTime,
+      moveNotations: [...state.moveNotations]
+    });
+
+    const startPos = gridToPixel(move.fr, move.fc);
+    const endPos = gridToPixel(move.tr, move.tc);
+
+    state.board[move.fr][move.fc] = null;
+    if (move.isEnPassant && move.epCapturePos) {
+      state.board[move.epCapturePos.r][move.epCapturePos.c] = null;
+    }
+
+    // 若是王車易位，同步移動城堡
+    if (move.isCastle && move.rookFrom && move.rookTo) {
+      const rook = state.board[move.rookFrom.r][move.rookFrom.c];
+      if (rook) {
+        rook.moved = true;
+        state.board[move.rookTo.r][move.rookTo.c] = rook;
+        state.board[move.rookFrom.r][move.rookFrom.c] = null;
+      }
+    }
+
+    state.selected = null;
+    state.lockedPiecePos = null;
+    state.legalMoves = [];
+    state.blockedMoves = [];
+    state.warningLine = null;
+
+    if (targetPiece) {
+      state.board[move.tr][move.tc] = null;
+      sfx.playBattle(movingPiece.type);
+      const moveNames = BATTLE_MOVES[movingPiece.type] || ['皇家樂團・華麗擊破！'];
+      const moveTitle = moveNames[Math.floor(Math.random() * moveNames.length)];
+
+      // 六大西洋棋兵種專屬受擊演出：
+      // 'K' (國王) -> 'ROYAL_BLAST' (黃金小提琴霸王音波震碎成漫天金光)
+      // 'Q' (皇后) -> 'ASH'         (魔導小提琴闇炎轟炸變焦黑、化作黑灰隨風飄散)
+      // 'R' (城堡) -> 'FLATTEN'     (高空掉落萬鈞巨石把敵人徹底壓扁成超扁紙片)
+      // 'B' (主教) -> 'SLASH_SPLIT' (手風琴和弦音刃十字斬斷、上下錯位滑開)
+      // 'N' (騎士) -> 'KICK_FLY'    (騎士轉身伸出強壯馬腿、一腳把敵人踢飛出舞台)
+      // 'P' (士兵) -> 'SKEWER_FLY'  (黃金長笛高音穿雲挑飛、高速旋轉飛出場外)
+      const styleMap = {
+        K: 'ROYAL_BLAST',
+        Q: 'ASH',
+        R: 'FLATTEN',
+        B: 'SLASH_SPLIT',
+        N: 'KICK_FLY',
+        P: 'SKEWER_FLY'
+      };
+      const deathStyle = styleMap[movingPiece.type] || 'SKEWER_FLY';
+
+      state.battleAnim = {
+        move,
+        attacker: { ...movingPiece },
+        defender: { ...targetPiece },
+        startX: startPos.x,
+        startY: startPos.y,
+        targetX: endPos.x,
+        targetY: endPos.y,
+        progress: 0,
+        duration: 1.85,
+        hitTriggered: false,
+        deathStyle,
+        title: moveTitle,
+        defFlyX: 392,
+        defFlyY: 472,
+        defScale: 2.25,
+        defRot: 0
+      };
+    } else {
+      sfx.playMove();
+      state.moveAnim = {
+        move,
+        piece: { ...movingPiece },
+        startX: startPos.x,
+        startY: startPos.y,
+        targetX: endPos.x,
+        targetY: endPos.y,
+        progress: 0,
+        duration: 0.16
+      };
+    }
+  }
+
+  function finalizeMove(move, movingPiece, capturedPiece) {
+    const originalType = movingPiece.type;
+    movingPiece.moved = true;
+
+    // 處理士兵抵達底線升變 (FIDE 規則：可升變為 皇后Q / 城堡R / 主教B / 騎士N)
+    let promoted = false;
+    if (move.promotion) {
+      movingPiece.type = move.promotion;
+      promoted = true;
+    }
+
+    state.board[move.tr][move.tc] = movingPiece;
+    state.lastMove = move;
+
+    // FIDE 50步規則計數更新：只要移動士兵或發生吃子即歸零，否則 +1 (半回合)
+    if (originalType === 'P' || capturedPiece) {
+      state.halfMoveClock = 0;
+    } else {
+      state.halfMoveClock++;
+    }
+
+    const pos = gridToPixel(move.tr, move.tc);
+    if (move.isCastle) {
+      spawnFloatingText(pos.x, pos.y - 36, '🏰 國王與城堡易位！', '#ffe066', 22);
+      spawnParticles(pos.x, pos.y, '#ffd43b', 20, 4.5);
+    }
+
+    if (promoted) {
+      sfx.playPromote();
+      const promoName = PIECE_NAMES[move.promotion] || '皇后';
+      spawnFloatingText(pos.x, pos.y - 42, `👑 士兵升變為${promoName}！`, '#ff99ff', 24);
+      spawnParticles(pos.x, pos.y, '#ffd43b', 32, 6);
+      if (movingPiece.side === SIDE_RED) {
+        state.score += 300;
+      }
+    }
+
+    if (capturedPiece) {
+      const pts = Math.round((PIECE_VALUES[capturedPiece.type] || 100) / 10);
+      if (movingPiece.side === SIDE_RED) {
+        state.capturedByRed.push(capturedPiece);
+        state.score += pts * 10;
+        if (state.score > state.bestScore) {
+          state.bestScore = state.score;
+          try { localStorage.setItem('kuromi_chess_best', String(state.bestScore)); } catch (e) {}
+        }
+        spawnFloatingText(pos.x, pos.y - 28, `+${pts * 10} 戰功`, '#ffe066', 20);
+      } else {
+        state.capturedByBlack.push(capturedPiece);
+      }
+    }
+
+    state.turn = state.turn === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+    if (state.turn === SIDE_RED) {
+      state.turnCount++;
+    }
+
+    const inCheck = isKingInCheck(state.board, state.turn);
+    state.inCheckSide = inCheck ? state.turn : null;
+
+    const nextMoves = getAllLegalMoves(state.board, state.turn, state.lastMove);
+    const isMate = nextMoves.length === 0 && inCheck;
+
+    // 記錄 FIDE 標準代數記譜法 (SAN)
+    const san = toAlgebraicNotation(move, { type: originalType }, capturedPiece, inCheck, isMate);
+    state.moveNotations.push(san);
+
+    // 記錄局面雜湊以供 FIDE 三次重複局面 (Threefold Repetition) 判定
+    const posKey = getPositionKey(state.board, state.turn, state.lastMove);
+    state.positionCounts[posKey] = (state.positionCounts[posKey] || 0) + 1;
+
+    if (nextMoves.length === 0) {
+      if (inCheck) {
+        state.winner = state.turn === SIDE_RED ? SIDE_BLACK : SIDE_RED;
+        if (state.winner === SIDE_RED) {
+          state.score += 500;
+          if (state.score > state.bestScore) {
+            state.bestScore = state.score;
+            try { localStorage.setItem('kuromi_chess_best', String(state.bestScore)); } catch (e) {}
+          }
+          state.winReason = 'Checkmate 將死！聖光白金樂團大獲全勝！';
+          sfx.playWin();
+        } else {
+          state.winReason = 'Checkmate 國王遭將死，暗夜紫黑樂團獲勝！';
+          sfx.playLose();
+        }
+      } else {
+        state.winner = 'DRAW';
+        state.winReason = 'FIDE Stalemate 無子可動（逼和），雙方和局！';
+        sfx.playCheck();
+      }
+      state.screen = 'GAMEOVER';
+      return;
+    }
+
+    // FIDE 官方和局判定 1：三次重複局面 (Threefold Repetition)
+    if (state.positionCounts[posKey] >= 3) {
+      state.winner = 'DRAW';
+      state.winReason = 'FIDE 規則：三次重複同一局面（Threefold Repetition）判和！';
+      sfx.playCheck();
+      state.screen = 'GAMEOVER';
+      return;
+    }
+
+    // FIDE 官方和局判定 2：50步規則 (Fifty-Move Rule，連續 100 半回合無兵移動且無吃子)
+    if (state.halfMoveClock >= 100) {
+      state.winner = 'DRAW';
+      state.winReason = 'FIDE 規則：連續 50 回合無吃子且無士兵推進（50-Move Rule）判和！';
+      sfx.playCheck();
+      state.screen = 'GAMEOVER';
+      return;
+    }
+
+    // FIDE 官方和局判定 3：子力不足死局 (Dead Position / Insufficient Material)
+    if (isInsufficientMaterial(state.board)) {
+      state.winner = 'DRAW';
+      state.winReason = 'FIDE 規則：雙方剩餘子力不足以將死（Insufficient Material）判和！';
+      sfx.playCheck();
+      state.screen = 'GAMEOVER';
+      return;
+    }
+
+    if (inCheck) {
+      sfx.playCheck();
+      const kPos = findKing(state.board, state.turn);
+      if (kPos) {
+        const p = gridToPixel(kPos.r, kPos.c);
+        spawnFloatingText(p.x, p.y - 38, 'Check 將軍（國王受脅）！', '#ff4d4d', 24);
+        spawnParticles(p.x, p.y, '#ff4d4d', 18, 4);
+      }
+    }
+
+    if (state.mode === 'AI' && state.turn === SIDE_BLACK && state.screen === 'PLAYING') {
+      state.aiThinking = true;
+      state.aiTimer = 0.25;
+    }
+  }
+
+  function handleUndo() {
+    if (state.moveAnim || state.battleAnim || state.aiThinking || state.pendingPromotion) return;
+    if (state.history.length === 0) return;
+
+    const steps = (state.mode === 'AI' && state.history.length >= 2) ? 2 : 1;
+    let snap = null;
+    for (let i = 0; i < steps; i++) {
+      if (state.history.length > 0) snap = state.history.pop();
+    }
+    if (snap) {
+      state.board = snap.board;
+      state.turn = snap.turn;
+      state.lastMove = snap.lastMove;
+      state.score = snap.score;
+      state.turnCount = snap.turnCount;
+      state.capturedByRed = snap.capturedByRed;
+      state.capturedByBlack = snap.capturedByBlack;
+      state.halfMoveClock = snap.halfMoveClock || 0;
+      state.positionCounts = snap.positionCounts ? { ...snap.positionCounts } : {};
+      state.whiteTime = snap.whiteTime ?? state.whiteTime;
+      state.blackTime = snap.blackTime ?? state.blackTime;
+      state.moveNotations = snap.moveNotations ? [...snap.moveNotations] : [];
+      state.selected = null;
+      state.lockedPiecePos = null;
+      state.legalMoves = [];
+      state.blockedMoves = [];
+      state.warningLine = null;
+      state.inCheckSide = isKingInCheck(state.board, state.turn) ? state.turn : null;
+      sfx.playSelect();
+    }
+  }
+
+  // =========================================================================
+  // 5. 3D 皇家樂團庫洛米西洋棋繪製引擎 (聖光白金 vs 暗夜紫黑)
+  // =========================================================================
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawButton(btn) {
+    state.uiButtons.push(btn);
+    ctx.save();
+    roundRect(ctx, btn.x, btn.y, btn.w, btn.h, btn.r || 12);
+    const grad = ctx.createLinearGradient(btn.x, btn.y, btn.x, btn.y + btn.h);
+    grad.addColorStop(0, btn.bg1 || '#6c2bd9');
+    grad.addColorStop(1, btn.bg2 || '#3c1382');
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = btn.border || '#ebc060';
+    ctx.stroke();
+
+    ctx.fillStyle = btn.color || '#fff3d6';
+    ctx.font = `bold ${btn.fontSize || 20}px "PingFang TC", "Microsoft JhengHei", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(btn.label, btn.x + btn.w / 2, btn.y + btn.h / 2 + 1);
+    ctx.restore();
+  }
+
+  // 安全單行文字縮放繪製：確保在 iPhone 13 / 17 Pro Max 任何字型下絕不超框重疊！
+  function drawFitText(text, x, y, maxWidth, fontSize = 14, align = 'left', color = '#f5e6c8', bold = true) {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'middle';
+    let curSize = fontSize;
+    ctx.font = `${bold ? 'bold ' : ''}${curSize}px -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif`;
+    while (ctx.measureText(text).width > maxWidth && curSize > 9.5) {
+      curSize -= 0.5;
+      ctx.font = `${bold ? 'bold ' : ''}${curSize}px -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif`;
+    }
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  // 繪製附圖招牌的「立體骷髏徽章」(額頭與獎盃底座浮雕共用)
+  function drawGoldenSkullBadge(ctx, cx, cy, scale = 1, color = '#f6c854', eyeColor = '#1b1126') {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(0, -1, 3.8, 0, Math.PI * 2);
+    ctx.fill();
+    roundRect(ctx, -2.2, 1.2, 4.4, 2.4, 0.8);
+    ctx.fill();
+
+    // 骷髏眼窩
+    ctx.fillStyle = eyeColor;
+    ctx.beginPath();
+    ctx.arc(-1.4, -1.0, 0.9, 0, Math.PI * 2);
+    ctx.arc(1.4, -1.0, 0.9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 繪製「巴洛克立體西洋棋獎盃底座」(強烈區分：聖光珍珠白金座 vs 暗夜黑曜紫晶座)
+  function drawChessPedestal(ctx, isGoldSide, type, charred = 0) {
+    ctx.save();
+    const isTall = (type === 'K' || type === 'Q');
+    const baseY = 21.5;
+
+    // 0. 陣營專屬高對比底座光暈墊圈 (讓棋子在深淺格上都瞬間跳出)
+    if (charred <= 0.5) {
+      ctx.beginPath();
+      ctx.ellipse(0, baseY + 0.8, 18.5, 6.2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = isGoldSide ? 'rgba(255, 225, 110, 0.42)' : 'rgba(168, 85, 247, 0.48)';
+      ctx.fill();
+    }
+
+    // 1. 雙陣營高反差材質漸層：
+    //    白方(玩家) = 聖光珍珠象牙白 × 亮香檳金底座
+    //    黑方(對手) = 暗夜黑曜石 × 深紫水晶底座
+    const stemGrad = ctx.createLinearGradient(-15, 6, 15, 22);
+    if (charred > 0.5) {
+      stemGrad.addColorStop(0, '#3a3836');
+      stemGrad.addColorStop(0.5, '#242220');
+      stemGrad.addColorStop(1, '#121110');
+    } else if (isGoldSide) {
+      stemGrad.addColorStop(0, '#ffffff');
+      stemGrad.addColorStop(0.45, '#fdf5e6');
+      stemGrad.addColorStop(0.82, '#e6c670');
+      stemGrad.addColorStop(1, '#b8860b');
+    } else {
+      stemGrad.addColorStop(0, '#3b1d5e');
+      stemGrad.addColorStop(0.45, '#190d29');
+      stemGrad.addColorStop(0.82, '#0d0617');
+      stemGrad.addColorStop(1, '#05020a');
+    }
+
+    const rimLight = charred > 0.5 ? '#4a4744' : (isGoldSide ? '#ffd700' : '#a855f7');
+    const rimDark  = charred > 0.5 ? '#2b2927' : (isGoldSide ? '#b47b12' : '#3b0764');
+
+    // 2. 最底層雙環底座盤
+    ctx.beginPath();
+    ctx.ellipse(0, baseY, 16.8, 5.4, 0, 0, Math.PI * 2);
+    ctx.fillStyle = rimDark;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.ellipse(0, baseY - 1.2, 16.0, 4.9, 0, 0, Math.PI * 2);
+    ctx.fillStyle = rimLight;
+    ctx.fill();
+
+    // 3. 喇叭狀裙擺底座
+    ctx.beginPath();
+    ctx.moveTo(-14.6, baseY - 1.8);
+    ctx.quadraticCurveTo(-9.5, baseY - 8.5, -7.2, baseY - 11.5);
+    ctx.lineTo(7.2, baseY - 11.5);
+    ctx.quadraticCurveTo(9.5, baseY - 8.5, 14.6, baseY - 1.8);
+    ctx.closePath();
+    ctx.fillStyle = stemGrad;
+    ctx.fill();
+    ctx.lineWidth = 1.3;
+    ctx.strokeStyle = rimLight;
+    ctx.stroke();
+
+    // 底座正面的三顆小骷髏浮雕
+    if (charred <= 0.5) {
+      const skullColor = isGoldSide ? '#d97706' : '#c084fc';
+      const eyeCol = isGoldSide ? '#fffbeb' : '#12071f';
+      drawGoldenSkullBadge(ctx, -7.8, baseY - 4.2, 0.56, skullColor, eyeCol);
+      drawGoldenSkullBadge(ctx, 0, baseY - 3.6, 0.66, skullColor, eyeCol);
+      drawGoldenSkullBadge(ctx, 7.8, baseY - 4.2, 0.56, skullColor, eyeCol);
+    }
+
+    // 4. 獎盃中段束腰環與聖杯托盤
+    ctx.beginPath();
+    ctx.ellipse(0, baseY - 11.5, 8.4, 2.6, 0, 0, Math.PI * 2);
+    ctx.fillStyle = rimLight;
+    ctx.fill();
+
+    const cupTopY = isTall ? (baseY - 16.8) : (baseY - 15.2);
+    ctx.beginPath();
+    ctx.moveTo(-6.8, baseY - 11.5);
+    ctx.quadraticCurveTo(-11.5, cupTopY + 1.5, -10.2, cupTopY);
+    ctx.lineTo(10.2, cupTopY);
+    ctx.quadraticCurveTo(11.5, cupTopY + 1.5, 6.8, baseY - 11.5);
+    ctx.closePath();
+    ctx.fillStyle = stemGrad;
+    ctx.fill();
+    ctx.strokeStyle = rimLight;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // 若為【城堡 R】，在底座上方加築高辨識度「立體城垛塔樓護牆」
+    if (type === 'R') {
+      const towerColor = charred > 0.5 ? '#363432' : (isGoldSide ? '#fff6d6' : '#2a1642');
+      roundRect(ctx, -12.5, cupTopY - 5.5, 25, 6.5, 1.5);
+      ctx.fillStyle = towerColor;
+      ctx.fill();
+      ctx.lineWidth = 1.3;
+      ctx.strokeStyle = rimLight;
+      ctx.stroke();
+      // 城垛凹凸齒
+      for (let bx = -11.5; bx <= 7.5; bx += 6) {
+        ctx.fillStyle = towerColor;
+        ctx.fillRect(bx, cupTopY - 8.2, 4, 3);
+        ctx.strokeRect(bx, cupTopY - 8.2, 4, 3);
+      }
+    } else if (type === 'B') {
+      roundRect(ctx, -10.5, cupTopY - 4.5, 21, 5.5, 2);
+      ctx.fillStyle = rimLight;
+      ctx.fill();
+      ctx.strokeStyle = rimDark;
+      ctx.lineWidth = 1;
+      for (let gx = -7.5; gx <= 7.5; gx += 3) {
+        ctx.beginPath();
+        ctx.moveTo(gx, cupTopY - 4.2);
+        ctx.lineTo(gx, cupTopY + 0.8);
+        ctx.stroke();
+      }
+    } else {
+      ctx.beginPath();
+      ctx.ellipse(0, cupTopY, 10.8, 3.2, 0, 0, Math.PI * 2);
+      ctx.fillStyle = rimLight;
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  // 繪製庫洛米頭部（強烈區分：白方「珍珠白金頭套＋珊瑚粉骷髏」 vs 黑方「暗夜黑紫頭套＋紫晶骷髏」）
+  function drawKuromiHead(ctx, cx, cy, r, isGoldSide, wink = false, charred = 0) {
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 強烈對比頭套色系：
+    // 白方 (isGoldSide = true)  -> 珍珠象牙白頭套 (#ffffff ~ #f3e5ab) + 璀璨金邊 (#d97706) + 甜美珊瑚粉金骷髏 (#fb7185)
+    // 黑方 (isGoldSide = false) -> 曜石黑紫頭套 (#2b1644 ~ #09040f) + 霓虹紫晶邊 (#c084fc) + 魅影紫晶骷髏 (#d8b4fe)
+    const hoodMain = charred > 0.5 ? '#262423' : (isGoldSide ? '#f5ebd6' : '#140b21');
+    const hoodHigh = charred > 0.5 ? '#423f3d' : (isGoldSide ? '#ffffff' : '#3b1d5e');
+    const hoodEdge = charred > 0.5 ? '#121110' : (isGoldSide ? '#d4af37' : '#07030c');
+    const trimColor = charred > 0.5 ? '#55524e' : (isGoldSide ? '#d97706' : '#a855f7');
+    const skullCol  = charred > 0.5 ? '#55524e' : (isGoldSide ? '#f43f5e' : '#c084fc');
+    const faceWhite = charred > 0.5 ? '#4a4745' : (isGoldSide ? '#fffdf9' : '#f5f0ff');
+
+    // 1. 兩側標誌性惡魔尖耳
+    [-1, 1].forEach(dir => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(dir * r * 0.45, -r * 0.55);
+      ctx.quadraticCurveTo(dir * r * 1.15, -r * 1.25, dir * r * 1.38, -r * 1.32);
+      ctx.quadraticCurveTo(dir * r * 1.28, -r * 0.55, dir * r * 0.92, -r * 0.05);
+      ctx.closePath();
+
+      const earGrad = ctx.createLinearGradient(0, -r * 1.3, dir * r * 1.3, 0);
+      earGrad.addColorStop(0, hoodHigh);
+      earGrad.addColorStop(1, hoodMain);
+      ctx.fillStyle = earGrad;
+      ctx.fill();
+
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = trimColor;
+      ctx.stroke();
+
+      // 耳根蝴蝶結/寶石球
+      if (charred <= 0.5) {
+        ctx.fillStyle = isGoldSide ? '#f59e0b' : '#c084fc';
+        ctx.beginPath();
+        ctx.arc(dir * r * 0.88, -r * 0.45, 2.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    });
+
+    // 2. 圓潤飽滿的頭套球體
+    const rx = r * 1.12;
+    const ry = r * 0.95;
+    const hoodGrad = ctx.createRadialGradient(-rx * 0.28, -ry * 0.35, r * 0.1, 0, 0, rx * 1.1);
+    hoodGrad.addColorStop(0, hoodHigh);
+    hoodGrad.addColorStop(0.6, hoodMain);
+    hoodGrad.addColorStop(1, hoodEdge);
+
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = hoodGrad;
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = trimColor;
+    ctx.stroke();
+
+    // 頭套左上角釉面高光反光條
+    if (charred <= 0.5) {
+      ctx.save();
+      ctx.fillStyle = isGoldSide ? 'rgba(255, 255, 255, 0.75)' : 'rgba(216, 180, 254, 0.28)';
+      ctx.beginPath();
+      ctx.ellipse(-rx * 0.48, -ry * 0.38, r * 0.26, r * 0.11, -0.55, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 3. 可愛臉龐開窗 (M 字尖拱裁切)
+    ctx.beginPath();
+    ctx.moveTo(0, -ry * 0.14);
+    ctx.quadraticCurveTo(rx * 0.45, -ry * 0.36, rx * 0.84, 0.05 * ry);
+    ctx.quadraticCurveTo(rx * 0.86, ry * 0.86, 0, ry * 0.88);
+    ctx.quadraticCurveTo(-rx * 0.86, ry * 0.86, -rx * 0.84, 0.05 * ry);
+    ctx.quadraticCurveTo(-rx * 0.45, -ry * 0.36, 0, -ry * 0.14);
+    ctx.closePath();
+    ctx.fillStyle = faceWhite;
+    ctx.fill();
+    ctx.lineWidth = 0.9;
+    ctx.strokeStyle = isGoldSide ? '#e6c670' : '#4c1d95';
+    ctx.stroke();
+
+    // 4. 額頭正中央的「立體骷髏頭徽章」(白方珊瑚粉紅、黑方魅影紫晶)
+    drawGoldenSkullBadge(ctx, 0, -ry * 0.46, 1.08, skullCol, isGoldSide ? '#fffbeb' : '#18092b');
+
+    // 5. 眼神與表情 (白方溫柔甜美笑眼/眨眼，黑方酷帥魅影紫瞳)
+    const eyeY = ry * 0.32;
+    const eyeX = rx * 0.44;
+    const eyeColor = isGoldSide ? '#451a03' : '#2e1065';
+    ctx.fillStyle = eyeColor;
+    ctx.strokeStyle = eyeColor;
+
+    // 左眼
+    ctx.beginPath();
+    ctx.ellipse(-eyeX, eyeY, r * 0.15, r * 0.21, -0.08, 0, Math.PI * 2);
+    ctx.fill();
+    if (charred <= 0.5) {
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(-eyeX - 0.6, eyeY - 1.0, r * 0.06, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 右眼
+    if (wink) {
+      ctx.lineWidth = 2.0;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(eyeX - r * 0.17, eyeY + 0.5);
+      ctx.quadraticCurveTo(eyeX, eyeY - r * 0.18, eyeX + r * 0.17, eyeY + 0.5);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = eyeColor;
+      ctx.beginPath();
+      ctx.ellipse(eyeX, eyeY, r * 0.15, r * 0.21, 0.08, 0, Math.PI * 2);
+      ctx.fill();
+      if (charred <= 0.5) {
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(eyeX - 0.6, eyeY - 1.0, r * 0.06, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // 粉嫩小鼻點與腮紅
+    if (charred <= 0.5) {
+      ctx.fillStyle = isGoldSide ? '#fb7185' : '#c084fc';
+      ctx.beginPath();
+      ctx.arc(0, ry * 0.46, 1.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = isGoldSide ? 'rgba(251, 113, 133, 0.35)' : 'rgba(192, 132, 252, 0.32)';
+      ctx.beginPath();
+      ctx.ellipse(-rx * 0.60, ry * 0.50, 2.6, 1.4, 0, 0, Math.PI * 2);
+      ctx.ellipse(rx * 0.60, ry * 0.50, 2.6, 1.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  // 繪製六大西洋棋兵種：強化「聖光白金 vs 暗夜紫黑」雙陣營反差，並為 6 大兵種賦予一眼可辨的專屬高聳頂飾與輪廓！
+  function draw3DKuromiChessModel(ctx, type, isGoldSide, charred = 0) {
+    ctx.save();
+    // 讓士兵 (P) 體型稍微精巧 (0.90x)，國王/皇后 (K/Q) 更加高大威嚴 (1.06x)，強化棋種階級感
+    const roleScale = (type === 'P') ? 0.90 : ((type === 'K' || type === 'Q') ? 1.05 : 0.98);
+    ctx.scale(roleScale, roleScale);
+
+    const goldBright = charred > 0.5 ? '#55524f' : (isGoldSide ? '#fff085' : '#e9d5ff');
+    const goldMain   = charred > 0.5 ? '#403d3a' : (isGoldSide ? '#f59e0b' : '#a855f7');
+    const goldDark   = charred > 0.5 ? '#262422' : (isGoldSide ? '#92400e' : '#4c1d95');
+    const robeMain   = charred > 0.5 ? '#1f1d1c' : (isGoldSide ? '#fffbeb' : '#140a24');
+    const robeTrim   = charred > 0.5 ? '#4a4744' : (isGoldSide ? '#d97706' : '#c084fc');
+
+    // 1. 先繪製下半部巴洛克立體獎盃底座
+    drawChessPedestal(ctx, isGoldSide, type, charred);
+
+    // 2. 繪製中段皇家樂團禮服與披風 (白方為珍珠白金禮服，黑方為暗夜哥德黑紫禮服)
+    ctx.save();
+    if (type === 'K' || type === 'Q') {
+      // 國王與皇后：華麗外展皇室大披風
+      ctx.beginPath();
+      ctx.moveTo(-9, -4.5);
+      ctx.lineTo(9, -4.5);
+      ctx.lineTo(15, 8.8);
+      ctx.lineTo(-15, 8.8);
+      ctx.closePath();
+      ctx.fillStyle = isGoldSide ? '#fef3c7' : '#2e1065';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = goldMain;
+      ctx.stroke();
+    }
+
+    // 禮服主幹
+    ctx.beginPath();
+    ctx.moveTo(-7.5, -3.5);
+    ctx.lineTo(7.5, -3.5);
+    ctx.lineTo(9.8, 7.2);
+    ctx.lineTo(-9.8, 7.2);
+    ctx.closePath();
+    ctx.fillStyle = robeMain;
+    ctx.fill();
+    ctx.lineWidth = 1.3;
+    ctx.strokeStyle = robeTrim;
+    ctx.stroke();
+
+    // 胸前十字交襟
+    ctx.strokeStyle = goldMain;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-4.5, -3);
+    ctx.lineTo(0, 3);
+    ctx.lineTo(4.5, -3);
+    ctx.stroke();
+    ctx.restore();
+
+    // 3. 繪製庫洛米頭部與六大兵種專屬「巨型西洋棋頂飾」及「樂團樂器」
+    const headY = (type === 'K' || type === 'Q') ? -11.8 : -10.2;
+    const winkRole = (type === 'Q' || type === 'B' || type === 'N');
+    drawKuromiHead(ctx, 0, headY, 10.6, isGoldSide, winkRole, charred);
+
+    ctx.save();
+    if (type === 'K') {
+      // 【國王 K】：全場最高聳的「神聖十字帝國皇冠」+ 黃金小提琴與琴弓
+      const crownY = headY - 9.5;
+      ctx.fillStyle = goldMain;
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(-4.5, crownY - 2.8, 4.4, 0, Math.PI * 2);
+      ctx.arc(4.5, crownY - 2.8, 4.4, 0, Math.PI * 2);
+      ctx.arc(0, crownY - 4.2, 5.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      roundRect(ctx, -7, crownY - 1, 14, 3.4, 1.2);
+      ctx.fillStyle = goldBright;
+      ctx.fill();
+      ctx.stroke();
+
+      // 醒目大十字架頂飾 (國王專屬識別)
+      ctx.fillStyle = goldBright;
+      ctx.fillRect(-1.6, crownY - 14.5, 3.2, 8.5);
+      ctx.fillRect(-4.8, crownY - 12.0, 9.6, 2.8);
+      ctx.strokeRect(-1.6, crownY - 14.5, 3.2, 8.5);
+
+      // 左手小提琴 + 右手琴弓
+      ctx.save();
+      ctx.translate(-11.8, -1.5);
+      ctx.rotate(-0.22);
+      ctx.fillStyle = isGoldSide ? '#d97706' : '#9333ea';
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.arc(0, -2.5, 3.2, 0, Math.PI * 2);
+      ctx.arc(0, 2.2, 4.0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = goldBright;
+      ctx.fillRect(-1.0, -9.5, 2.0, 6.5);
+      ctx.restore();
+
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.moveTo(7, 3);
+      ctx.lineTo(13.5, -7.5);
+      ctx.stroke();
+
+    } else if (type === 'Q') {
+      // 【皇后 Q】：寬展華麗「五芒珍珠寶石后冠」+ 發光長權杖
+      const crownY = headY - 9.2;
+      ctx.fillStyle = goldBright;
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(-7.5, crownY + 1.5);
+      ctx.lineTo(-9.5, crownY - 6.5);
+      ctx.lineTo(-4.2, crownY - 2.5);
+      ctx.lineTo(0, crownY - 10.5);
+      ctx.lineTo(4.2, crownY - 2.5);
+      ctx.lineTo(9.5, crownY - 6.5);
+      ctx.lineTo(7.5, crownY + 1.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // 后冠頂端三顆璀璨寶石珠
+      ctx.fillStyle = isGoldSide ? '#f43f5e' : '#38bdf8';
+      [[-9.5, crownY - 7.2], [0, crownY - 11.5], [9.5, crownY - 7.2]].forEach(([px, py]) => {
+        ctx.beginPath();
+        ctx.arc(px, py, 1.9, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      // 皇后長權杖
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(-11.5, 7);
+      ctx.lineTo(-8.5, -9);
+      ctx.stroke();
+      ctx.fillStyle = isGoldSide ? '#fb7185' : '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(-8.5, -10.5, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+
+    } else if (type === 'R') {
+      // 【城堡 R】：寬厚「巨型城垛塔樓冠 (Rook Battlement Crown)」+ 胸前戰鼓
+      const shakoY = headY - 8.8;
+      ctx.fillStyle = isGoldSide ? '#fef3c7' : '#2e1065';
+      ctx.strokeStyle = goldMain;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(-8.5, shakoY + 1.8);
+      ctx.lineTo(-8.5, shakoY - 7.5);
+      ctx.lineTo(-4.8, shakoY - 7.5);
+      ctx.lineTo(-4.8, shakoY - 4.2);
+      ctx.lineTo(-1.8, shakoY - 4.2);
+      ctx.lineTo(-1.8, shakoY - 7.5);
+      ctx.lineTo(1.8, shakoY - 7.5);
+      ctx.lineTo(1.8, shakoY - 4.2);
+      ctx.lineTo(4.8, shakoY - 4.2);
+      ctx.lineTo(4.8, shakoY - 7.5);
+      ctx.lineTo(8.5, shakoY - 7.5);
+      ctx.lineTo(8.5, shakoY + 1.8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // 胸前戰鼓
+      roundRect(ctx, -7.8, 0.2, 15.6, 7.2, 2);
+      ctx.fillStyle = goldBright;
+      ctx.fill();
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-6, 1.0);
+      ctx.lineTo(-3, 6.8);
+      ctx.lineTo(0, 1.0);
+      ctx.lineTo(3, 6.8);
+      ctx.lineTo(6, 1.0);
+      ctx.stroke();
+
+    } else if (type === 'B') {
+      // 【主教 B】：高聳尖拱「西洋棋主教冠 (Mitre) ＋ 大型白羽飾」+ 胸前手風琴
+      const hatY = headY - 8.5;
+      ctx.fillStyle = goldMain;
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(-7.2, hatY + 1);
+      ctx.quadraticCurveTo(-7.5, hatY - 8.5, 0, hatY - 12.5);
+      ctx.quadraticCurveTo(7.5, hatY - 8.5, 7.2, hatY + 1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // 主教帽正中央十字紋與側邊飄揚大羽毛
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(0, hatY - 9.5); ctx.lineTo(0, hatY - 2.5);
+      ctx.moveTo(-3, hatY - 6.2); ctx.lineTo(3, hatY - 6.2);
+      ctx.stroke();
+
+      if (charred <= 0.5) {
+        ctx.fillStyle = isGoldSide ? '#ffffff' : '#f0abfc';
+        ctx.beginPath();
+        ctx.ellipse(7.5, hatY - 5.5, 2.8, 6.5, 0.42, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // 胸前百褶手風琴
+      roundRect(ctx, -7.5, -1.5, 15, 7.5, 1.8);
+      ctx.fillStyle = goldBright;
+      ctx.fill();
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      for (let ax = -4.5; ax <= 4.5; ax += 3) {
+        ctx.beginPath();
+        ctx.moveTo(ax, -1.2);
+        ctx.lineTo(ax, 5.6);
+        ctx.stroke();
+      }
+
+    } else if (type === 'N') {
+      // 【騎士 N】：醒目「皇家戰馬鬃毛頭盔冠 ＋ 騎士馬頭盾徽」+ 側背大圓行軍鼓
+      const shakoY = headY - 9.0;
+      // 飛揚的戰馬鬃毛冠 (Crest Plume)
+      ctx.fillStyle = isGoldSide ? '#fb7185' : '#38bdf8';
+      ctx.beginPath();
+      ctx.arc(0, shakoY - 5.5, 7.5, Math.PI * 0.9, Math.PI * 2.1);
+      ctx.fill();
+
+      roundRect(ctx, -6.2, shakoY - 5.5, 12.4, 7.5, 2.2);
+      ctx.fillStyle = isGoldSide ? '#fffbeb' : '#1b1326';
+      ctx.fill();
+      ctx.lineWidth = 1.3;
+      ctx.strokeStyle = goldMain;
+      ctx.stroke();
+
+      // 身體左側背著大圓行軍鼓 + 右手騎士紋章小盾
+      ctx.save();
+      ctx.translate(-9.5, 1.5);
+      ctx.fillStyle = goldMain;
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 5.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = '#fff8dc';
+      ctx.beginPath();
+      ctx.arc(0, 0, 3.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(6, 2);
+      ctx.lineTo(13, -4);
+      ctx.stroke();
+
+    } else {
+      // 【士兵 P】：輕巧「圓頂小樂隊帽 ＋ 圓球頂飾 (Pawn Ball Topper)」+ 斜吹長笛
+      const shakoY = headY - 8.5;
+      roundRect(ctx, -5.2, shakoY - 4.2, 10.4, 5.8, 2.5);
+      ctx.fillStyle = isGoldSide ? '#fffbeb' : '#1b1326';
+      ctx.fill();
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = goldMain;
+      ctx.stroke();
+
+      // 西洋棋士兵經典圓球頂飾
+      ctx.fillStyle = goldBright;
+      ctx.beginPath();
+      ctx.arc(0, shakoY - 6.8, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = goldDark;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // 胸前斜握的黃金長笛
+      ctx.strokeStyle = goldBright;
+      ctx.lineWidth = 2.6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-11.0, -2.0);
+      ctx.lineTo(11.0, 5.2);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // 渲染單顆 3D 庫洛米西洋棋公仔 + 高對比陣營膠囊銘牌
+  function drawPiece(x, y, piece, scale = 1, alpha = 1, rotation = 0, isSelected = false, charred = 0) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate(rotation);
+    ctx.scale(scale, scale);
+
+    const isGoldSide = piece.side === SIDE_RED;
+
+    // 1. 選中時腳下展開聖光金 / 暗夜紫魔法陣光環
+    if (isSelected) {
+      const pulse = 1 + Math.sin(state.animClock * 7) * 0.07;
+      ctx.save();
+      ctx.scale(pulse, pulse);
+      ctx.beginPath();
+      ctx.ellipse(0, 19, 26, 11, 0, 0, Math.PI * 2);
+      ctx.fillStyle = isGoldSide ? 'rgba(255, 240, 138, 0.72)' : 'rgba(192, 132, 252, 0.72)';
+      ctx.fill();
+      ctx.lineWidth = 2.8;
+      ctx.strokeStyle = isGoldSide ? '#f59e0b' : '#d8b4fe';
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 2. 底座落在棋盤格上的立體接觸陰影
+    if (charred < 0.7) {
+      ctx.beginPath();
+      ctx.ellipse(0, 22, 17.5, 6.0, 0, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.fill();
+    }
+
+    // 3. 選中時輕快上下浮動
+    const bounceY = isSelected ? (-5.0 + Math.sin(state.animClock * 8) * 2.2) : 0;
+    ctx.translate(0, bounceY);
+
+    // 4. 繪製 3D 庫洛米皇家西洋棋本體
+    draw3DKuromiChessModel(ctx, piece.type, isGoldSide, charred);
+
+    // 5. 正下方偏右的高反差雙字全名膠囊銘牌 (白方：象牙白底深紅棕字；黑方：深紫黑底亮青白字)
+    if (charred < 0.6) {
+      const tagX = 13.5;
+      const tagY = 17.5;
+      const badgeW = 26;
+      const badgeH = 14.5;
+      ctx.save();
+      roundRect(ctx, tagX - badgeW / 2, tagY - badgeH / 2 + 1.4, badgeW, badgeH, 7.2);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fill();
+
+      roundRect(ctx, tagX - badgeW / 2, tagY - badgeH / 2, badgeW, badgeH, 7.2);
+      ctx.fillStyle = isGoldSide ? '#fffbeb' : '#1e1b4b';
+      ctx.fill();
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = isGoldSide ? '#d97706' : '#c084fc';
+      ctx.stroke();
+
+      const label = PIECE_NAMES[piece.type] || PIECE_LABELS[piece.side][piece.type];
+      ctx.fillStyle = isGoldSide ? '#78350f' : '#f0f9ff';
+      ctx.font = 'bold 9.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, tagX, tagY + 0.5);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  // 繪製吃子專屬「皇家歌劇院演武小劇場動畫」！
+  function renderBattleCutscene(b) {
+    const t = b.progress;
+    const isGoldAtk = b.attacker.side === SIDE_RED;
+
+    let openAlpha = 1.0;
+    if (t < 0.12) openAlpha = t / 0.12;
+    else if (t > 0.88) openAlpha = Math.max(0, (1 - t) / 0.12);
+
+    ctx.save();
+
+    // 1. 全畫面暗化聚光背景
+    ctx.fillStyle = `rgba(8, 5, 15, ${0.82 * openAlpha})`;
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    // 2. 皇家歌劇院小劇場舞台外框 (y: 230 ~ 660)
+    const stageX = 24, stageY = 230, stageW = LOGICAL_W - 48, stageH = 430;
+    ctx.save();
+    ctx.globalAlpha = openAlpha;
+
+    roundRect(ctx, stageX, stageY, stageW, stageH, 20);
+    const stageGrad = ctx.createLinearGradient(0, stageY, 0, stageY + stageH);
+    stageGrad.addColorStop(0, '#1c112b');
+    stageGrad.addColorStop(0.58, '#331d4f');
+    stageGrad.addColorStop(0.60, '#6e4c1e');
+    stageGrad.addColorStop(1, '#241536');
+    ctx.fillStyle = stageGrad;
+    ctx.fill();
+
+    ctx.save();
+    roundRect(ctx, stageX + 4, stageY + 4, stageW - 8, stageH - 8, 16);
+    ctx.clip();
+
+    // 背景五線譜與交響樂速度光束
+    ctx.strokeStyle = isGoldAtk ? 'rgba(255, 215, 90, 0.18)' : 'rgba(192, 132, 252, 0.18)';
+    ctx.lineWidth = 3;
+    for (let i = 0; i < 12; i++) {
+      const ly = stageY + 30 + i * 24;
+      const offset = ((t * 900 + i * 73) % 260) - 130;
+      ctx.beginPath();
+      ctx.moveTo(stageX + offset, ly);
+      ctx.lineTo(stageX + stageW + offset, ly - 16);
+      ctx.stroke();
+    }
+
+    // 皇家西洋棋格紋舞台地面
+    const floorTop = stageY + 265;
+    const floorGrad = ctx.createLinearGradient(0, floorTop, 0, stageY + stageH);
+    floorGrad.addColorStop(0, '#2e2240');
+    floorGrad.addColorStop(1, '#120b1c');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(stageX, floorTop, stageW, stageH - 265);
+
+    ctx.strokeStyle = 'rgba(235, 192, 96, 0.35)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(stageX, floorTop);
+    ctx.lineTo(stageX + stageW, floorTop);
+    for (let i = -3; i <= 3; i++) {
+      ctx.moveTo(LOGICAL_W / 2 + i * 55, floorTop);
+      ctx.lineTo(LOGICAL_W / 2 + i * 115, stageY + stageH);
+    }
+    ctx.stroke();
+
+    // 頂部雙方對決名條 (VS Banner)
+    ctx.fillStyle = 'rgba(15, 9, 26, 0.92)';
+    ctx.fillRect(stageX, stageY, stageW, 54);
+    ctx.strokeStyle = '#ebc060';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(stageX, stageY + 54);
+    ctx.lineTo(stageX + stageW, stageY + 54);
+    ctx.stroke();
+
+    const atkTitle = `${PIECE_CHESS_ICONS[b.attacker.type]} 【${PIECE_NAMES[b.attacker.type]}】${PIECE_TITLES[b.attacker.type]}`;
+    const defTitle = `${PIECE_CHESS_ICONS[b.defender.type]} 【${PIECE_NAMES[b.defender.type]}】${PIECE_TITLES[b.defender.type]}`;
+    drawFitText(atkTitle, stageX + 14, stageY + 27, 212, 14, 'left', b.attacker.side === SIDE_RED ? '#ffe066' : '#d8b4fe', true);
+    drawFitText(defTitle, stageX + stageW - 14, stageY + 27, 212, 14, 'right', b.defender.side === SIDE_RED ? '#ffe066' : '#d8b4fe', true);
+
+    ctx.textAlign = 'center';
+    ctx.font = 'italic bold 20px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillStyle = '#ff6b9d';
+    ctx.fillText('VS', LOGICAL_W / 2, stageY + 28);
+
+    const baseAtkX = 148, baseAtkY = 472;
+    const baseDefX = 392, baseDefY = 472;
+    const modelScale = 2.25;
+
+    let atkX = baseAtkX, atkY = baseAtkY, atkRot = 0, atkScale = modelScale;
+    const type = b.attacker.type;
+
+    if (t < 0.24) {
+      const p = t / 0.24;
+      atkX = baseAtkX - (1 - p) * 70 + Math.sin(p * 30) * 3;
+      atkScale = modelScale * (0.9 + p * 0.15);
+    } else if (t < 0.44) {
+      const p = (t - 0.24) / 0.20;
+      if (type === 'Q') {
+        atkX = baseAtkX - Math.sin(p * Math.PI) * 16;
+        atkRot = -Math.sin(p * Math.PI) * 0.12;
+      } else if (type === 'K') {
+        atkY = baseAtkY - Math.sin(p * Math.PI) * 26;
+        atkScale = modelScale * (1.05 + p * 0.2);
+      } else if (type === 'N') {
+        // 騎士衝刺到敵方身前急停轉身，準備伸出雙馬腿後踢
+        atkX = baseAtkX + (baseDefX - baseAtkX - 88) * Math.min(1, p * 1.35);
+        atkY = baseAtkY - Math.sin(Math.min(1, p * 1.35) * Math.PI) * 24;
+        atkRot = p > 0.65 ? -((p - 0.65) / 0.35) * 0.35 : 0.12;
+      } else if (type === 'R') {
+        // 城堡原地敲響城垛戰鼓震地蓄力，召喚高空巨石墜落
+        atkX = baseAtkX + Math.sin(p * Math.PI * 3) * 8;
+        atkY = baseAtkY - Math.sin(p * Math.PI * 2) * 14;
+        atkScale = modelScale * (1.05 + Math.sin(p * Math.PI) * 0.16);
+      } else {
+        atkX = baseAtkX + (baseDefX - baseAtkX - 35) * p;
+        atkY = baseAtkY - Math.sin(p * Math.PI) * 25;
+      }
+    } else {
+      if (type === 'Q' || type === 'K' || type === 'R') {
+        atkX = baseAtkX;
+        atkY = baseAtkY;
+      } else if (type === 'N') {
+        // 騎士保持前傾伸腿踢擊帥氣收招姿勢
+        const kickHold = Math.max(0, 1 - (t - 0.44) / 0.42);
+        atkX = baseDefX - 88;
+        atkY = baseDefY - kickHold * 8;
+        atkRot = -0.35 * kickHold;
+      } else {
+        atkX = baseDefX - 65;
+        atkY = baseDefY;
+      }
+    }
+
+    // 繪製防守方受擊演出
+    if (t < 0.44) {
+      const panicShake = t > 0.24 ? Math.sin(t * 95) * 5 : 0;
+      drawPiece(baseDefX + panicShake, baseDefY, b.defender, modelScale, 1.0, 0, false, 0);
+    } else {
+      const dp = Math.min(1, (t - 0.44) / 0.48);
+      if (b.deathStyle === 'ASH') {
+        const shake = (1 - dp) * Math.sin(t * 90) * 7;
+        const fadeAlpha = dp < 0.35 ? 1.0 : Math.max(0, 1 - (dp - 0.35) / 0.65);
+        drawPiece(baseDefX + shake, baseDefY, b.defender, modelScale * (1 - dp * 0.12), fadeAlpha, 0, false, 1.0);
+      } else if (b.deathStyle === 'ROYAL_BLAST') {
+        const fadeAlpha = Math.max(0, 1 - dp * 1.15);
+        drawPiece(baseDefX + dp * 24, baseDefY - dp * 28, b.defender, modelScale * (1 + dp * 0.45), fadeAlpha, dp * 0.2, false, 0);
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, (1 - dp) * 0.85);
+        ctx.fillStyle = '#ffe066';
+        ctx.beginPath();
+        ctx.arc(baseDefX + dp * 24, baseDefY - dp * 28, 45 + dp * 55, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      } else if (b.deathStyle === 'FLATTEN') {
+        // 【城堡 R】：被天降萬鈞巨石當場壓成超扁二維紙片貼地消散！
+        const fadeAlpha = Math.max(0, 1 - Math.max(0, dp - 0.45) / 0.55);
+        ctx.save();
+        ctx.translate(baseDefX, baseDefY + 42);
+        ctx.scale(1.65, Math.max(0.11, 1 - dp * 3.4));
+        drawPiece(0, -18, b.defender, modelScale, fadeAlpha, 0, false, 0);
+        ctx.restore();
+      } else if (b.deathStyle === 'SLASH_SPLIT') {
+        const fadeAlpha = Math.max(0, 1 - Math.max(0, dp - 0.25) / 0.75);
+        const slide = dp * 52;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(baseDefX - 110, baseDefY - 110, 220, 102);
+        ctx.clip();
+        drawPiece(baseDefX - slide, baseDefY - slide * 0.4, b.defender, modelScale, fadeAlpha, -dp * 0.28, false, 0);
+        ctx.restore();
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(baseDefX - 110, baseDefY - 8, 220, 110);
+        ctx.clip();
+        drawPiece(baseDefX + slide, baseDefY + slide * 0.4, b.defender, modelScale, fadeAlpha, dp * 0.32, false, 0);
+        ctx.restore();
+      } else if (b.deathStyle === 'KICK_FLY') {
+        // 【騎士 N】：被伸出的雙馬腿一腳踹飛，呈拋物線高速翻滾飛出舞台右側！
+        const flyX = baseDefX + dp * 230;
+        const flyY = baseDefY - Math.sin(dp * Math.PI * 0.85) * 155 - dp * 35;
+        const fadeAlpha = Math.max(0, 1 - Math.max(0, dp - 0.55) / 0.45);
+        drawPiece(flyX, flyY, b.defender, modelScale * (1 - dp * 0.28), fadeAlpha, dp * 22, false, 0);
+      } else if (b.deathStyle === 'SKEWER_FLY') {
+        const flyX = baseDefX + dp * 140;
+        const flyY = baseDefY - Math.sin(dp * Math.PI * 0.85) * 160 - dp * 40;
+        const fadeAlpha = Math.max(0, 1 - dp * 1.1);
+        drawPiece(flyX, flyY, b.defender, modelScale * (1 - dp * 0.3), fadeAlpha, dp * 18, false, 0);
+      }
+    }
+
+    // 繪製攻擊方特寫模型（騎士 N 附帶三道高速殘影）
+    if (type === 'N' && t >= 0.20 && t <= 0.48) {
+      for (let g = 1; g <= 3; g++) {
+        const ghostX = Math.max(baseAtkX, atkX - g * 34);
+        const ghostAlpha = Math.max(0, 0.42 - g * 0.11);
+        drawPiece(ghostX, baseAtkY, b.attacker, modelScale * 0.96, ghostAlpha, 0.08, false, 0);
+      }
+    }
+    drawPiece(atkX, atkY, b.attacker, atkScale, 1.0, atkRot, false, 0);
+
+    // 【騎士 N 專屬】：命中前後伸出兩條強壯駿馬後腿＋黃金鐵蹄猛烈踹向敵人！
+    if (type === 'N' && t >= 0.36 && t <= 0.76) {
+      const kickP = t < 0.44
+        ? (t - 0.36) / 0.08
+        : Math.max(0, 1 - (t - 0.44) / 0.32);
+      const legReach = 22 + kickP * 76;
+
+      ctx.save();
+      ctx.translate(atkX + 12, atkY + 6);
+      // 繪製上下兩條肌肉線條分明的戰馬後腿與發光鐵蹄
+      [-0.22, 0.08].forEach((ang, idx) => {
+        ctx.save();
+        ctx.rotate(ang);
+        // 馬腿大腿與小腿節段
+        const legGrad = ctx.createLinearGradient(0, -10, legReach, 10);
+        legGrad.addColorStop(0, isGoldAtk ? '#f59e0b' : '#4c1d95');
+        legGrad.addColorStop(0.65, isGoldAtk ? '#fffbeb' : '#2e1065');
+        legGrad.addColorStop(1, isGoldAtk ? '#d97706' : '#7e22ce');
+
+        ctx.fillStyle = legGrad;
+        ctx.strokeStyle = isGoldAtk ? '#fde047' : '#d8b4fe';
+        ctx.lineWidth = 2.2;
+        roundRect(ctx, 0, -9 + idx * 3, legReach, 17, 8.5);
+        ctx.fill();
+        ctx.stroke();
+
+        // 末端重裝戰馬黃金鐵蹄 (Horseshoe)
+        ctx.fillStyle = '#ffd43b';
+        ctx.strokeStyle = '#78350f';
+        ctx.lineWidth = 2;
+        roundRect(ctx, legReach - 10, -12 + idx * 3, 18, 23, 6);
+        ctx.fill();
+        ctx.stroke();
+
+        // 鐵蹄釘紋
+        ctx.fillStyle = '#78350f';
+        ctx.beginPath();
+        ctx.arc(legReach - 2, -6 + idx * 3, 2, 0, Math.PI * 2);
+        ctx.arc(legReach - 2, 5 + idx * 3, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      });
+      ctx.restore();
+    }
+
+    // 繪製樂團武器與落石光效
+    if (type === 'Q') {
+      if (t >= 0.24 && t < 0.44) {
+        const p = (t - 0.24) / 0.20;
+        const bx = (atkX + 25) + (baseDefX - atkX - 25) * p;
+        const by = (atkY - 25) + (baseDefY - atkY + 15) * p - Math.sin(p * Math.PI) * 85;
+        ctx.fillStyle = '#c084fc';
+        ctx.beginPath();
+        ctx.arc(bx, by, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff5f7';
+        ctx.beginPath();
+        ctx.arc(bx, by, 9, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (t >= 0.44) {
+        const ep = Math.min(1, (t - 0.44) / 0.45);
+        ctx.strokeStyle = `rgba(192, 132, 252, ${1 - ep})`;
+        ctx.lineWidth = 14 * (1 - ep);
+        ctx.beginPath();
+        ctx.arc(baseDefX, baseDefY, 30 + ep * 110, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else if (type === 'K') {
+      if (t >= 0.24 && t < 0.44) {
+        const p = (t - 0.24) / 0.20;
+        const bx = (atkX + 35) + (baseDefX - atkX - 35) * p;
+        const by = atkY - 10;
+        const grad = ctx.createRadialGradient(bx, by, 5, bx, by, 44);
+        grad.addColorStop(0, '#ffffff');
+        grad.addColorStop(0.45, '#ffd43b');
+        grad.addColorStop(1, 'rgba(255, 180, 0, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(bx, by, 44, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (type === 'B' && t >= 0.42 && t < 0.78) {
+      const ep = (t - 0.42) / 0.36;
+      ctx.save();
+      ctx.translate(baseDefX, baseDefY);
+      ctx.globalAlpha = 1 - ep;
+      ctx.strokeStyle = '#ffe066';
+      ctx.lineWidth = 12 * (1 - ep * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(-95, -85); ctx.lineTo(95, 85);
+      ctx.moveTo(95, -85); ctx.lineTo(-95, 85);
+      ctx.stroke();
+      ctx.restore();
+    } else if (type === 'R') {
+      // 【城堡 R 專屬】：高空掉落刻有「城堡」金印的萬鈞巨石轟然砸扁敵人！
+      if (t >= 0.28) {
+        const fallP = Math.min(1, (t - 0.28) / 0.16);
+        const fadeP = t > 0.74 ? Math.max(0, 1 - (t - 0.74) / 0.20) : 1.0;
+        const startRockY = stageY + 18;
+        const groundRockY = baseDefY + 14;
+        const rockY = startRockY + (groundRockY - startRockY) * (fallP * fallP);
+
+        ctx.save();
+        ctx.globalAlpha = fadeP;
+        ctx.translate(baseDefX, rockY);
+
+        // 下墜風壓速度線
+        if (fallP < 1) {
+          ctx.strokeStyle = 'rgba(255, 230, 150, 0.75)';
+          ctx.lineWidth = 3.5;
+          [-34, 0, 34].forEach(lx => {
+            ctx.beginPath();
+            ctx.moveTo(lx, -55);
+            ctx.lineTo(lx, -105);
+            ctx.stroke();
+          });
+        }
+
+        // 巨石立體岩塊主體
+        const rockGrad = ctx.createLinearGradient(-52, -52, 52, 36);
+        rockGrad.addColorStop(0, '#cbd5e1');
+        rockGrad.addColorStop(0.45, '#64748b');
+        rockGrad.addColorStop(1, '#1e293b');
+        ctx.fillStyle = rockGrad;
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.moveTo(-44, -36);
+        ctx.lineTo(-14, -52);
+        ctx.lineTo(28, -48);
+        ctx.lineTo(54, -20);
+        ctx.lineTo(48, 26);
+        ctx.lineTo(-48, 26);
+        ctx.lineTo(-54, -10);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // 巨石裂紋與「城堡」金色封印銘文
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.55)';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(-28, -32);
+        ctx.lineTo(-12, -12);
+        ctx.lineTo(-22, 6);
+        ctx.moveTo(30, -28);
+        ctx.lineTo(18, -6);
+        ctx.stroke();
+
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = 'bold 24px "PingFang TC", "Microsoft JhengHei", serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('城堡', 0, -8);
+        ctx.restore();
+      }
+
+      // 巨石落地瞬間的裂地黃金衝擊波環
+      if (t >= 0.44) {
+        const ep = Math.min(1, (t - 0.44) / 0.48);
+        ctx.save();
+        ctx.translate(baseDefX, baseDefY + 38);
+        for (let k = 0; k < 3; k++) {
+          const rx = Math.max(4, (42 + ep * 125) - k * 22);
+          const ry = Math.max(3, (14 + ep * 42) - k * 8);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(255, 215, 90, ${Math.max(0, 1 - ep)})`;
+          ctx.lineWidth = Math.max(1, 6 - k);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    } else if (type === 'N' && t >= 0.40) {
+      const ep = Math.min(1, (t - 0.40) / 0.48);
+      if (ep < 0.55) {
+        const slashP = ep / 0.55;
+        ctx.save();
+        ctx.translate(baseDefX - 18, baseDefY - 4);
+        ctx.rotate(-0.45);
+        ctx.strokeStyle = `rgba(255, 230, 102, ${1 - slashP})`;
+        ctx.lineWidth = 16 * (1 - slashP);
+        ctx.beginPath();
+        ctx.arc(0, 0, 38 + slashP * 55, -Math.PI * 0.45, Math.PI * 0.45);
+        ctx.stroke();
+        ctx.restore();
+      }
+    } else if (type === 'P' && t >= 0.38 && t < 0.72) {
+      const ep = (t - 0.38) / 0.34;
+      ctx.save();
+      ctx.translate(baseDefX, baseDefY);
+      ctx.globalAlpha = 1 - ep;
+      ctx.fillStyle = '#ffe066';
+      ctx.beginPath();
+      ctx.moveTo(-80, -14);
+      ctx.lineTo(95 + ep * 40, -25);
+      ctx.lineTo(-80, 14);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    if (t >= 0.43 && t <= 0.50) {
+      const flashAlpha = Math.sin(((t - 0.43) / 0.07) * Math.PI) * 0.55;
+      ctx.fillStyle = `rgba(255, 245, 210, ${flashAlpha})`;
+      ctx.fillRect(stageX, stageY, stageW, stageH);
+    }
+
+    ctx.restore(); // 結束舞台內部 clip
+
+    roundRect(ctx, stageX, stageY, stageW, stageH, 20);
+    ctx.lineWidth = 4.5;
+    ctx.strokeStyle = '#ebc060';
+    ctx.stroke();
+
+    const bannerW = 340, bannerH = 46;
+    const bannerX = (LOGICAL_W - bannerW) / 2;
+    const bannerY = stageY + stageH - 28;
+    roundRect(ctx, bannerX, bannerY, bannerW, bannerH, 23);
+    ctx.fillStyle = '#140b21';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ffd866';
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 22px "PingFang TC", "Microsoft JhengHei", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(b.title, LOGICAL_W / 2, bannerY + bannerH / 2 + 1);
+
+    ctx.restore();
+
+    if (b.deathStyle === 'SCREEN_FLY' && t >= 0.44) {
+      const flyP = (t - 0.44) / 0.56;
+      const flyAlpha = flyP > 0.76 ? Math.max(0, 1 - (flyP - 0.76) / 0.24) : 1.0;
+      drawPiece(b.defFlyX, b.defFlyY, b.defender, b.defScale, flyAlpha, b.defRot, false, 0);
+    }
+
+    ctx.restore();
+  }
+
+  // 繪製附圖同款「黑曜石 × 珍珠白 × 皇家金邊」8x8 國際象棋盤
+  function drawBoard() {
+    const pad = 24;
+    // 棋盤底層立體陰影
+    roundRect(ctx, BOARD_LEFT - pad, BOARD_TOP - pad + 8, BOARD_W + pad * 2, BOARD_H + pad * 2, 18);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+    ctx.fill();
+
+    // 巴洛克黑金邊框
+    roundRect(ctx, BOARD_LEFT - pad, BOARD_TOP - pad, BOARD_W + pad * 2, BOARD_H + pad * 2, 18);
+    const frameGrad = ctx.createLinearGradient(0, BOARD_TOP - pad, 0, BOARD_TOP + BOARD_H + pad);
+    frameGrad.addColorStop(0, '#2c1d3d');
+    frameGrad.addColorStop(0.5, '#191024');
+    frameGrad.addColorStop(1, '#110a1a');
+    ctx.fillStyle = frameGrad;
+    ctx.fill();
+
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = '#ebc060';
+    ctx.stroke();
+
+    // 內圈金線裝飾
+    ctx.strokeStyle = 'rgba(235, 192, 96, 0.65)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(BOARD_LEFT - 3, BOARD_TOP - 3, BOARD_W + 6, BOARD_H + 6);
+
+    // 繪製 8x8 皇家胡桃木 × 暖米白大理石交錯方格 (讓「珍珠白金棋子」與「暗夜紫黑棋子」在深淺格都擁有極佳對比度！)
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const sx = BOARD_LEFT + c * CELL_SIZE;
+        const sy = BOARD_TOP + r * CELL_SIZE;
+        const isLight = (r + c) % 2 === 0;
+
+        if (isLight) {
+          const sqGrad = ctx.createLinearGradient(sx, sy, sx + CELL_SIZE, sy + CELL_SIZE);
+          sqGrad.addColorStop(0, '#eadbcf');
+          sqGrad.addColorStop(1, '#d8c3b0');
+          ctx.fillStyle = sqGrad;
+        } else {
+          const sqGrad = ctx.createLinearGradient(sx, sy, sx + CELL_SIZE, sy + CELL_SIZE);
+          sqGrad.addColorStop(0, '#6e5243');
+          sqGrad.addColorStop(1, '#543c30');
+          ctx.fillStyle = sqGrad;
+        }
+        ctx.fillRect(sx, sy, CELL_SIZE, CELL_SIZE);
+
+        // 中央 4x4 格子繪製附圖展示台同款淡金色西洋棋浮水印
+        if (r >= 2 && r <= 5 && c >= 2 && c <= 5 && (r + c) % 2 === 1) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(255, 225, 130, 0.10)';
+          ctx.font = '26px serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText((r + c) % 4 === 1 ? '♛' : '♞', sx + CELL_SIZE / 2, sy + CELL_SIZE / 2);
+          ctx.restore();
+        }
+      }
+    }
+
+    // 棋盤座標標記 (A~H 與 8~1)
+    ctx.fillStyle = '#ebc060';
+    ctx.font = 'bold 12px "PingFang TC", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const files = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
+    for (let c = 0; c < 8; c++) {
+      const cx = BOARD_LEFT + (c + 0.5) * CELL_SIZE;
+      ctx.fillText(files[c], cx, BOARD_TOP + BOARD_H + 13);
+      ctx.fillText(files[c], cx, BOARD_TOP - 13);
+    }
+    for (let r = 0; r < 8; r++) {
+      const cy = BOARD_TOP + (r + 0.5) * CELL_SIZE;
+      const rankLabel = String(8 - r);
+      ctx.fillText(rankLabel, BOARD_LEFT - 13, cy);
+      ctx.fillText(rankLabel, BOARD_LEFT + BOARD_W + 13, cy);
+    }
+
+    // 上一步移動軌跡高亮框
+    if (state.lastMove) {
+      const fPos = gridToPixel(state.lastMove.fr, state.lastMove.fc);
+      const tPos = gridToPixel(state.lastMove.tr, state.lastMove.tc);
+      ctx.fillStyle = 'rgba(245, 197, 66, 0.25)';
+      ctx.fillRect(fPos.x - CELL_SIZE / 2, fPos.y - CELL_SIZE / 2, CELL_SIZE, CELL_SIZE);
+      ctx.fillRect(tPos.x - CELL_SIZE / 2, tPos.y - CELL_SIZE / 2, CELL_SIZE, CELL_SIZE);
+      ctx.strokeStyle = 'rgba(245, 197, 66, 0.85)';
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(tPos.x - CELL_SIZE / 2 + 2, tPos.y - CELL_SIZE / 2 + 2, CELL_SIZE - 4, CELL_SIZE - 4);
+    }
+  }
+
+  function renderPlaying() {
+    // 頂部皇家資訊面板 (針對 iPhone 13 / 17 Pro Max 雙欄防重疊自適應排版)
+    roundRect(ctx, 18, 12, LOGICAL_W - 36, 154, 16);
+    const topGrad = ctx.createLinearGradient(0, 12, 0, 166);
+    topGrad.addColorStop(0, '#2a1b3d');
+    topGrad.addColorStop(1, '#170e24');
+    ctx.fillStyle = topGrad;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#ebc060';
+    ctx.stroke();
+
+    // 第一列：左側標題 + 右側雙功能按鈕（嚴格限制寬度不碰撞）
+    drawFitText('楚漢演武 · FIDE 皇家西洋棋', 30, 36, 268, 20, 'left', '#ffd866', true);
+
+    // FIDE 摸子走子規則 (Touch-Move) 切換按鈕
+    drawButton({
+      x: LOGICAL_W - 218,
+      y: 20,
+      w: 106,
+      h: 34,
+      r: 8,
+      label: state.touchPieceRule ? '✋ 摸子走子:開' : '✋ 摸子走子:關',
+      fontSize: 12.5,
+      bg1: state.touchPieceRule ? '#b45309' : '#3b2154',
+      bg2: state.touchPieceRule ? '#78350f' : '#201030',
+      action: 'TOGGLE_TOUCH_RULE'
+    });
+
+    drawButton({
+      x: LOGICAL_W - 104,
+      y: 20,
+      w: 76,
+      h: 34,
+      r: 8,
+      label: sfx.muted ? '🔇 靜音' : '🔊 音效',
+      fontSize: 13.5,
+      bg1: '#3b2154',
+      bg2: '#201030'
+    });
+
+    // 第二列：FIDE 雙陣營計時鐘 + 回合/50步規則（三欄平均分配寬度）
+    const wClockStr = `⏱️白方 ${formatChessClock(state.whiteTime)}`;
+    const bClockStr = `⏱️黑方 ${formatChessClock(state.blackTime)}`;
+    drawFitText(wClockStr, 30, 68, 125, 14, 'left', state.turn === SIDE_RED ? '#fde047' : '#cbd5e1', true);
+    drawFitText(bClockStr, 162, 68, 125, 14, 'left', state.turn === SIDE_BLACK ? '#d8b4fe' : '#cbd5e1', true);
+    drawFitText(`第 ${state.turnCount} 回合 | 50步:${Math.floor(state.halfMoveClock / 2)}/50`, LOGICAL_W - 28, 68, 210, 13.5, 'right', '#f5e6c8', true);
+
+    // 第三列：目前行棋方提示 + 右側取消選取按鈕
+    const turnText = state.aiThinking
+      ? '暗夜紫黑（電腦）思考樂章中...'
+      : (state.turn === SIDE_RED ? '輪到：聖光白金（白方）出招' : '輪到：暗夜紫黑（黑方）出招');
+    drawFitText(turnText, 30, 98, state.selected && !state.touchPieceRule ? 360 : 480, 15, 'left', state.turn === SIDE_RED ? '#fde68a' : '#d8b4fe', true);
+
+    if (state.selected && !state.touchPieceRule) {
+      drawButton({
+        x: LOGICAL_W - 126,
+        y: 82,
+        w: 98,
+        h: 32,
+        r: 8,
+        label: '✖ 取消選取',
+        fontSize: 13,
+        bg1: '#78350f',
+        bg2: '#451a03',
+        action: 'DESELECT'
+      });
+    }
+
+    // 第四列：最新 FIDE SAN 代數記譜紀錄（獨立一行，絕不與已選棋子名稱重疊）
+    const recentSAN = state.moveNotations.slice(-5).map((s, idx) => {
+      const ply = state.moveNotations.length - Math.min(5, state.moveNotations.length) + idx;
+      const moveNum = Math.floor(ply / 2) + 1;
+      return ply % 2 === 0 ? `${moveNum}.${s}` : s;
+    }).join(' ');
+    drawFitText(`棋譜(SAN)：${recentSAN || '開局準備中 (白方先手)'}`, 30, 126, 480, 13, 'left', '#c4b5fd', false);
+
+    // 第五列：顯示當前選中棋子稱號或操作提示
+    if (state.selected) {
+      const sp = state.board[state.selected.r][state.selected.c];
+      if (sp) {
+        const selInfo = state.touchPieceRule
+          ? `🔒 FIDE 摸子鎖定：【${PIECE_NAMES[sp.type]}】${PIECE_TITLES[sp.type]}`
+          : `✨ 已選取：【${PIECE_NAMES[sp.type]}】${PIECE_TITLES[sp.type]}`;
+        drawFitText(selInfo, 30, 149, 480, 13, 'left', '#ffd866', true);
+      }
+    } else {
+      drawFitText('💡 點擊己方棋子顯示合法落點（支援王車易位、過路兵、底線升變）', 30, 149, 480, 12.5, 'left', '#a78bfa', false);
+    }
+
+    drawBoard();
+
+    // 由上至下繪製 8x8 棋盤上的 3D 庫洛米西洋棋公仔
+    for (let r = 0; r < BOARD_ROWS; r++) {
+      for (let c = 0; c < BOARD_COLS; c++) {
+        const p = state.board[r][c];
+        if (!p) continue;
+        const pos = gridToPixel(r, c);
+        const isSel = state.selected && state.selected.r === r && state.selected.c === c;
+        drawPiece(pos.x, pos.y, p, 1, 1, 0, isSel, 0);
+      }
+    }
+
+    // 在最上層繪製合法移動指標（支援一般移動、吃子、王車易位、吃過路兵標示）
+    for (const m of state.legalMoves) {
+      const pos = gridToPixel(m.tr, m.tc);
+      const target = state.board[m.tr][m.tc] || (m.isEnPassant ? true : null);
+      if (target) {
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        ctx.beginPath();
+        ctx.arc(0, 0, 24, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ff2a55';
+        ctx.lineWidth = 3.5;
+        ctx.stroke();
+
+        ctx.fillStyle = '#d91848';
+        roundRect(ctx, -18, -31, 36, 16, 8);
+        ctx.fill();
+        ctx.strokeStyle = '#fff8eb';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 10.5px "PingFang TC", "Microsoft JhengHei", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(m.isEnPassant ? '⚔️過路' : '⚔️吃', 0, -23);
+        ctx.restore();
+      } else {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, m.isCastle ? 11 : 9, 0, Math.PI * 2);
+        ctx.fillStyle = m.isCastle ? '#f59e0b' : '#22c55e';
+        ctx.fill();
+        ctx.lineWidth = 2.2;
+        ctx.strokeStyle = '#fffdf7';
+        ctx.stroke();
+        if (m.isCastle) {
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 10px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('易', pos.x, pos.y + 0.5);
+        }
+        ctx.restore();
+      }
+    }
+
+    // 繪製護王禁著標記
+    if (state.blockedMoves && state.blockedMoves.length > 0) {
+      for (const bm of state.blockedMoves) {
+        const bpos = gridToPixel(bm.tr, bm.tc);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(bpos.x, bpos.y, 7.5, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(200, 45, 55, 0.75)';
+        ctx.fill();
+        ctx.strokeStyle = '#fff5eb';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(bpos.x - 3.8, bpos.y - 3.8); ctx.lineTo(bpos.x + 3.8, bpos.y + 3.8);
+        ctx.moveTo(bpos.x + 3.8, bpos.y - 3.8); ctx.lineTo(bpos.x - 3.8, bpos.y + 3.8);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    if (state.warningLine && state.warningLine.timer > 0) {
+      const wl = state.warningLine;
+      const p1 = gridToPixel(wl.from.r, wl.from.c);
+      const p2 = gridToPixel(wl.to.r, wl.to.c);
+      ctx.save();
+      ctx.strokeStyle = `rgba(255, 50, 70, ${Math.min(1, wl.timer)})`;
+      ctx.lineWidth = 4;
+      ctx.setLineDash([8, 6]);
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    if (state.moveAnim) {
+      const m = state.moveAnim;
+      const ease = 1 - Math.pow(1 - m.progress, 3);
+      const curX = m.startX + (m.targetX - m.startX) * ease;
+      const curY = m.startY + (m.targetY - m.startY) * ease - Math.sin(m.progress * Math.PI) * 14;
+      drawPiece(curX, curY, m.piece, 1.12, 1, 0, false, 0);
+    }
+
+    // 底部戰俘與控制面板 (針對手機螢幕防超框排版)
+    roundRect(ctx, 18, 706, LOGICAL_W - 36, 232, 16);
+    const botGrad = ctx.createLinearGradient(0, 706, 0, 938);
+    botGrad.addColorStop(0, '#2a1b3d');
+    botGrad.addColorStop(1, '#160d21');
+    ctx.fillStyle = botGrad;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#ebc060';
+    ctx.stroke();
+
+    const redCaps = state.capturedByRed.map(p => `${PIECE_CHESS_ICONS[p.type]}${PIECE_NAMES[p.type]}`).join(' ') || '尚無';
+    drawFitText(`聖光白金擄獲：${redCaps}`, 32, 740, LOGICAL_W - 64, 14, 'left', '#fde68a', true);
+
+    const blkCaps = state.capturedByBlack.map(p => `${PIECE_CHESS_ICONS[p.type]}${PIECE_NAMES[p.type]}`).join(' ') || '尚無';
+    drawFitText(`暗夜紫黑擄獲：${blkCaps}`, 32, 774, LOGICAL_W - 64, 14, 'left', '#d8b4fe', true);
+
+    const btnY = 812;
+    const btnW = 148;
+    const btnH = 52;
+    drawButton({
+      x: 34, y: btnY, w: btnW, h: btnH, r: 10,
+      label: '↩ 悔棋一招',
+      fontSize: 17,
+      bg1: state.history.length > 0 ? '#3a5a40' : '#3a3532',
+      bg2: state.history.length > 0 ? '#233827' : '#24201e',
+      action: 'UNDO'
+    });
+    drawButton({
+      x: 196, y: btnY, w: btnW, h: btnH, r: 10,
+      label: '🔄 重新開局',
+      fontSize: 17,
+      bg1: '#8f5b14',
+      bg2: '#543308',
+      action: 'RESTART'
+    });
+    drawButton({
+      x: 358, y: btnY, w: btnW, h: btnH, r: 10,
+      label: '🏠 主選單',
+      fontSize: 17,
+      bg1: '#5b237a',
+      bg2: '#331047',
+      action: 'MENU'
+    });
+
+    drawFitText('遵循 FIDE 國際棋聯規則：升變四選一、王車易位、過路兵、三次重複與50步判和', LOGICAL_W / 2, 902, LOGICAL_W - 60, 12.5, 'center', '#c4b5d6', false);
+
+    // 若觸發 FIDE 士兵底線升變，繪製「皇后 / 城堡 / 主教 / 騎士」四選一互動視窗
+    if (state.pendingPromotion) {
+      renderPromotionModal();
+    }
+
+    if (state.battleAnim) {
+      renderBattleCutscene(state.battleAnim);
+    }
+  }
+
+  // FIDE 規則：士兵抵達底線時，由玩家自由選擇升變為「皇后、城堡、主教、騎士」任一兵種
+  function renderPromotionModal() {
+    const promo = state.pendingPromotion;
+    if (!promo) return;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(10, 5, 20, 0.84)';
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    const boxW = 468, boxH = 310;
+    const boxX = (LOGICAL_W - boxW) / 2;
+    const boxY = (LOGICAL_H - boxH) / 2 - 20;
+
+    roundRect(ctx, boxX, boxY, boxW, boxH, 20);
+    const grad = ctx.createLinearGradient(0, boxY, 0, boxY + boxH);
+    grad.addColorStop(0, '#321c4a');
+    grad.addColorStop(1, '#160b24');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = '#ffd866';
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 25px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('👑 FIDE 士兵升變（Pawn Promotion）', LOGICAL_W / 2, boxY + 42);
+
+    ctx.fillStyle = '#e9d5ff';
+    ctx.font = '15px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('士兵已抵達敵陣底線！請依 FIDE 規則選擇要升變的皇家樂團棋子：', LOGICAL_W / 2, boxY + 76);
+
+    const choices = [
+      { type: 'Q', label: '♛ 皇后' },
+      { type: 'R', label: '♜ 城堡' },
+      { type: 'B', label: '♝ 主教' },
+      { type: 'N', label: '♞ 騎士' }
+    ];
+
+    const cardW = 98, cardH = 165;
+    const startX = boxX + 24;
+    const gap = 10;
+
+    choices.forEach((ch, idx) => {
+      const cx = startX + idx * (cardW + gap);
+      const cy = boxY + 104;
+
+      roundRect(ctx, cx, cy, cardW, cardH, 14);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.07)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ebc060';
+      ctx.stroke();
+
+      // 繪製對應升變 3D 庫洛米模型預覽
+      drawPiece(cx + cardW / 2, cy + 72, { side: promo.side, type: ch.type }, 1.15);
+
+      drawButton({
+        x: cx + 7,
+        y: cy + 120,
+        w: cardW - 14,
+        h: 36,
+        r: 9,
+        label: ch.label,
+        fontSize: 15,
+        bg1: '#7e22ce',
+        bg2: '#4c1d95',
+        action: `PROMOTE_${ch.type}`
+      });
+    });
+
+    ctx.restore();
+  }
+
+  function renderMenu() {
+    roundRect(ctx, 28, 48, LOGICAL_W - 56, LOGICAL_H - 96, 22);
+    const grad = ctx.createLinearGradient(0, 48, 0, LOGICAL_H - 48);
+    grad.addColorStop(0, '#2e1c44');
+    grad.addColorStop(0.5, '#1b1029');
+    grad.addColorStop(1, '#10091a');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#ebc060';
+    ctx.stroke();
+
+    // 主視覺展示附圖中的三尊代表棋子：小提琴國王、權杖皇后、行軍鼓騎士
+    drawPiece(LOGICAL_W / 2 - 110, 165, { side: SIDE_BLACK, type: 'Q' }, 1.55);
+    drawPiece(LOGICAL_W / 2, 154, { side: SIDE_RED, type: 'K' }, 1.75);
+    drawPiece(LOGICAL_W / 2 + 110, 165, { side: SIDE_RED, type: 'N' }, 1.55);
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 46px "PingFang TC", "Microsoft JhengHei", serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('皇家樂團西洋棋', LOGICAL_W / 2, 268);
+
+    ctx.fillStyle = '#e5d4ff';
+    ctx.font = 'bold 19px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText('楚漢演武 · 3D 黑金骷髏皇家樂團版', LOGICAL_W / 2, 316);
+
+    roundRect(ctx, 105, 350, LOGICAL_W - 210, 44, 22);
+    ctx.fillStyle = 'rgba(235, 192, 96, 0.16)';
+    ctx.fill();
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(`最高戰功紀錄：${state.bestScore}`, LOGICAL_W / 2, 372);
+
+    drawButton({
+      x: 80, y: 428, w: LOGICAL_W - 160, h: 64, r: 16,
+      label: '🎻 單人挑戰（初學演武）',
+      fontSize: 22,
+      bg1: '#6c2bd9',
+      bg2: '#3c1382',
+      action: 'START_NORMAL'
+    });
+
+    drawButton({
+      x: 80, y: 512, w: LOGICAL_W - 160, h: 64, r: 16,
+      label: '👑 單人挑戰（宗師交響）',
+      fontSize: 22,
+      bg1: '#b87e19',
+      bg2: '#6e4708',
+      action: 'START_HARD'
+    });
+
+    drawButton({
+      x: 80, y: 596, w: LOGICAL_W - 160, h: 64, r: 16,
+      label: '👥 雙人同機輪流對弈',
+      fontSize: 22,
+      bg1: '#2b6e59',
+      bg2: '#153d30',
+      action: 'START_PVP'
+    });
+
+    drawButton({
+      x: 80, y: 682, w: 182, h: 54, r: 14,
+      label: '📜 FIDE規則與圖鑑',
+      fontSize: 17,
+      bg1: '#3b2454',
+      bg2: '#211230',
+      action: 'HELP'
+    });
+
+    drawButton({
+      x: LOGICAL_W - 262, y: 682, w: 182, h: 54, r: 14,
+      label: sfx.muted ? '🔇 音效：關' : '🔊 音效：開',
+      fontSize: 18,
+      bg1: '#3b2454',
+      bg2: '#211230',
+      action: 'MUTE'
+    });
+
+    ctx.fillStyle = '#b49fcc';
+    ctx.font = '14px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('遵循 FIDE 國際棋聯官方競賽規則 · 升變四選一 / 摸子走子 / 50步與三次重複判和', LOGICAL_W / 2, 795);
+  }
+
+  function renderHelp() {
+    roundRect(ctx, 22, 28, LOGICAL_W - 44, LOGICAL_H - 56, 20);
+    ctx.fillStyle = '#1c102b';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#ebc060';
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 25px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('📜 FIDE 國際棋聯官方競賽規則與圖鑑', LOGICAL_W / 2, 68);
+
+    const roster = [
+      { type: 'K', side: SIDE_RED, desc: '國王 (King)：走鄰近1格，不可送吃；支援短易位(O-O)與長易位(O-O-O)。' },
+      { type: 'Q', side: SIDE_BLACK, desc: '皇后 (Queen)：直行、橫行、斜行不限格數，不可越子，威力最強。' },
+      { type: 'R', side: SIDE_RED, desc: '城堡 (Rook)：直行、橫行不限格數，不可越子，可與國王進行王車易位。' },
+      { type: 'B', side: SIDE_BLACK, desc: '主教 (Bishop)：沿同色格斜線滑行不限格數，不可越子，分白格與黑格主教。' },
+      { type: 'N', side: SIDE_RED, desc: '騎士 (Knight)：L型（日字）跳躍移動，唯一能跨越其他棋子的兵種。' },
+      { type: 'P', side: SIDE_BLACK, desc: '士兵 (Pawn)：直進1格(首步可2格)、斜吃1格；支援吃過路兵與底線升變四選一。' }
+    ];
+
+    let y = 122;
+    for (const item of roster) {
+      drawPiece(68, y, { side: item.side, type: item.type }, 0.90);
+      drawFitText(item.desc, 104, y + 4, LOGICAL_W - 134, 13.5, 'left', '#f5e6c8', true);
+      y += 58;
+    }
+
+    drawFitText('【FIDE 官方競賽規範（本局全面實裝）】', 42, y + 8, LOGICAL_W - 84, 16.5, 'left', '#ffd866', true);
+
+    const fideRules = [
+      '1. 白方先手與棋盤配置：右下角 (h1) 為白格，皇后置於己方顏色格 (白后d1、黑后d8)。',
+      '2. 士兵升變 (Promotion)：抵達第8/1橫排時，可自由選擇升變為「皇后、城堡、主教、騎士」。',
+      '3. 王車易位 (Castling)：王與車皆未移動、中間無阻擋，且國王未受將軍亦不經過受攻擊格。',
+      '4. 摸子走子 (Touch-Move)：可於上方切換開關；開啟時觸摸有合法步之己方棋子即須走該子。',
+      '5. 官方和局判定：無子可動逼和(Stalemate)、三次重複局面、50步無兵推進無吃子、子力不足。',
+      '6. 比賽計時與代數記譜：內建雙方 10 分鐘快棋鐘(超時判負)與即時 SAN 標準代數記譜紀錄。'
+    ];
+
+    fideRules.forEach((line, idx) => {
+      drawFitText(line, 42, y + 34 + idx * 24, LOGICAL_W - 84, 13, 'left', '#e5d4ff', false);
+    });
+
+    drawButton({
+      x: 110, y: 842, w: LOGICAL_W - 220, h: 52, r: 15,
+      label: '返回主選單',
+      fontSize: 20,
+      action: 'MENU'
+    });
+  }
+
+  function renderGameOverOverlay() {
+    ctx.fillStyle = 'rgba(10, 5, 18, 0.82)';
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    roundRect(ctx, 44, 230, LOGICAL_W - 88, 470, 22);
+    const grad = ctx.createLinearGradient(0, 230, 0, 700);
+    grad.addColorStop(0, '#321c4a');
+    grad.addColorStop(1, '#180d26');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#ffd866';
+    ctx.stroke();
+
+    const isRedWin = state.winner === SIDE_RED;
+    const isDraw = state.winner === 'DRAW';
+    ctx.fillStyle = isRedWin ? '#ffd866' : (isDraw ? '#93c5fd' : '#d8b4fe');
+    ctx.font = 'bold 38px "PingFang TC", "Microsoft JhengHei", serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(
+      isRedWin ? '👑 聖光白金樂團凱旋！' : (isDraw ? '🤝 雙方握手言和！' : '🎻 暗夜紫黑樂團制勝！'),
+      LOGICAL_W / 2,
+      305
+    );
+
+    ctx.fillStyle = '#f5e6c8';
+    ctx.font = 'bold 18px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(state.winReason, LOGICAL_W / 2, 365);
+
+    ctx.fillStyle = '#ffd866';
+    ctx.font = 'bold 26px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(`本局戰功：${state.score}`, LOGICAL_W / 2, 430);
+
+    ctx.fillStyle = '#d4b483';
+    ctx.font = '19px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.fillText(`總回合數：${state.turnCount}  |  最高紀錄：${state.bestScore}`, LOGICAL_W / 2, 475);
+
+    drawButton({
+      x: 95, y: 530, w: LOGICAL_W - 190, h: 62, r: 16,
+      label: '⚔️ 再玩一局',
+      fontSize: 23,
+      bg1: '#6c2bd9',
+      bg2: '#3c1382',
+      action: 'RESTART'
+    });
+
+    drawButton({
+      x: 95, y: 610, w: LOGICAL_W - 190, h: 54, r: 14,
+      label: '返回主選單',
+      fontSize: 20,
+      bg1: '#3b2454',
+      bg2: '#211230',
+      action: 'MENU'
+    });
+  }
+
+  // =========================================================================
+  // 6. 遊戲主迴圈與動畫更新 (完整物理與粒子更新 + Canvas 獨立渲染)
+  // =========================================================================
+  let lastTime = performance.now();
+
+  function update(dt) {
+    state.animClock += dt;
+    if (state.warningLine && state.warningLine.timer > 0) {
+      state.warningLine.timer = Math.max(0, state.warningLine.timer - dt);
+    }
+
+    // FIDE 比賽計時鐘倒數與超時判負 (Flag Fall)
+    if (state.screen === 'PLAYING' && !state.moveAnim && !state.battleAnim && !state.pendingPromotion) {
+      if (state.turn === SIDE_RED) {
+        state.whiteTime = Math.max(0, state.whiteTime - dt);
+        if (state.whiteTime <= 0) {
+          state.winner = SIDE_BLACK;
+          state.winReason = 'FIDE 規則：白方思考時間耗盡（超時判負），暗夜紫黑獲勝！';
+          sfx.playLose();
+          state.screen = 'GAMEOVER';
+        }
+      } else {
+        state.blackTime = Math.max(0, state.blackTime - dt);
+        if (state.blackTime <= 0) {
+          state.winner = SIDE_RED;
+          state.winReason = 'FIDE 規則：黑方思考時間耗盡（超時判負），聖光白金獲勝！';
+          sfx.playWin();
+          state.screen = 'GAMEOVER';
+        }
+      }
+    }
+
+    if (state.screenShake > 0) {
+      state.screenShake = Math.max(0, state.screenShake - dt * 35);
+    }
+
+    if (state.moveAnim) {
+      state.moveAnim.progress += dt / state.moveAnim.duration;
+      if (state.moveAnim.progress >= 1) {
+        const { move, piece } = state.moveAnim;
+        state.moveAnim = null;
+        finalizeMove(move, piece, null);
+      }
+    }
+
+    if (state.battleAnim) {
+      const b = state.battleAnim;
+      b.progress += dt / b.duration;
+
+      if (b.progress >= 0.44 && !b.hitTriggered) {
+        b.hitTriggered = true;
+        state.screenShake = (b.deathStyle === 'FLATTEN' || b.deathStyle === 'KICK_FLY') ? 18 : 13;
+        const hitX = 392, hitY = 472;
+
+        if (b.deathStyle === 'ASH') {
+          spawnParticles(hitX, hitY, '#c084fc', 34, 7.5);
+          spawnAshParticles(hitX, hitY, 85);
+        } else if (b.deathStyle === 'FLATTEN') {
+          spawnParticles(hitX, hitY + 28, '#cbd5e1', 38, 8.5);
+          spawnParticles(hitX, hitY + 28, '#fbbf24', 26, 7.0);
+        } else if (b.deathStyle === 'ROYAL_BLAST') {
+          spawnParticles(hitX, hitY, '#ffd43b', 45, 8.0);
+          spawnParticles(hitX, hitY, '#fff9c4', 28, 5.5);
+        } else if (b.deathStyle === 'SLASH_SPLIT') {
+          spawnParticles(hitX, hitY, '#ffe066', 34, 8.0);
+          spawnParticles(hitX, hitY, '#f472b6', 20, 5.5);
+        } else if (b.deathStyle === 'KICK_FLY') {
+          spawnParticles(hitX - 16, hitY, '#ffe066', 38, 9.0);
+          spawnParticles(hitX - 16, hitY, '#fb7185', 22, 6.5);
+        } else {
+          const color = b.attacker.side === SIDE_RED ? '#ffd43b' : '#c084fc';
+          spawnParticles(hitX, hitY, color, 32, 7.5);
+        }
+      }
+
+      if (b.progress >= 1) {
+        const { move, attacker, defender } = b;
+        state.battleAnim = null;
+        finalizeMove(move, attacker, defender);
+      }
+    }
+
+    if (state.aiThinking && !state.moveAnim && !state.battleAnim && !state.pendingPromotion && state.screen === 'PLAYING') {
+      state.aiTimer -= dt;
+      if (state.aiTimer <= 0) {
+        state.aiThinking = false;
+        const aiMove = getBestAIMove(state.board, state.difficulty);
+        if (aiMove) {
+          executeMove(aiMove);
+        }
+      }
+    }
+
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.18;
+      p.life -= p.decay;
+      if (p.life <= 0) state.particles.splice(i, 1);
+    }
+
+    for (let i = state.ashParticles.length - 1; i >= 0; i--) {
+      const ap = state.ashParticles[i];
+      ap.wobble += 0.14;
+      ap.x += ap.vx + Math.sin(ap.wobble) * 0.85;
+      ap.y += ap.vy;
+      ap.life -= ap.decay;
+      if (ap.life <= 0) state.ashParticles.splice(i, 1);
+    }
+
+    for (let i = state.floatingTexts.length - 1; i >= 0; i--) {
+      const ft = state.floatingTexts[i];
+      ft.y += ft.vy;
+      ft.life -= ft.decay;
+      if (ft.life <= 0) state.floatingTexts.splice(i, 1);
+    }
+  }
+
+  function render() {
+    state.uiButtons = [];
+    ctx.save();
+    ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    ctx.fillStyle = '#14101c';
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    if (state.screenShake > 0) {
+      const sx = (Math.random() - 0.5) * state.screenShake;
+      const sy = (Math.random() - 0.5) * state.screenShake;
+      ctx.translate(sx, sy);
+    }
+
+    if (state.screen === 'MENU') {
+      renderMenu();
+    } else if (state.screen === 'HELP') {
+      renderHelp();
+    } else if (state.screen === 'PLAYING' || state.screen === 'GAMEOVER') {
+      renderPlaying();
+      if (state.screen === 'GAMEOVER') {
+        renderGameOverOverlay();
+      }
+    }
+
+    for (const ap of state.ashParticles) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, ap.life);
+      ctx.fillStyle = `rgb(${ap.shade}, ${ap.shade}, ${ap.shade})`;
+      ctx.beginPath();
+      ctx.ellipse(ap.x, ap.y, ap.size, ap.size * 0.6, ap.wobble, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (const p of state.particles) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    for (const ft of state.floatingTexts) {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, ft.life);
+      ctx.font = `bold ${ft.size}px -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.strokeStyle = '#12081f';
+      ctx.lineWidth = 4;
+      ctx.strokeText(ft.text, ft.x, ft.y);
+      ctx.fillStyle = ft.color;
+      ctx.fillText(ft.text, ft.x, ft.y);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function loop(now) {
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // =========================================================================
+  // 7. Pointer 觸控與滑鼠點擊事件處理
+  // =========================================================================
+  function getLogicalPoint(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = LOGICAL_W / rect.width;
+    const scaleY = LOGICAL_H / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY
+    };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    sfx.unlock();
+    const pt = getLogicalPoint(e);
+
+    for (let i = state.uiButtons.length - 1; i >= 0; i--) {
+      const btn = state.uiButtons[i];
+      if (pt.x >= btn.x && pt.x <= btn.x + btn.w && pt.y >= btn.y && pt.y <= btn.y + btn.h) {
+        if (btn.label.includes('音效') || btn.action === 'MUTE') {
+          sfx.toggleMute();
+          if (!sfx.muted) sfx.playSelect();
+          return;
+        }
+        if (btn.action && btn.action.startsWith('PROMOTE_') && state.pendingPromotion) {
+          const chosenType = btn.action.replace('PROMOTE_', '');
+          const move = { ...state.pendingPromotion.move, promotion: chosenType };
+          state.pendingPromotion = null;
+          executeMove(move);
+          return;
+        }
+        if (btn.action === 'TOGGLE_TOUCH_RULE') {
+          state.touchPieceRule = !state.touchPieceRule;
+          if (!state.touchPieceRule) {
+            state.lockedPiecePos = null;
+          } else if (state.selected && state.legalMoves.length > 0) {
+            state.lockedPiecePos = { ...state.selected };
+          }
+          sfx.playSelect();
+          return;
+        }
+        if (btn.action === 'DESELECT') {
+          if (state.touchPieceRule && state.lockedPiecePos) {
+            sfx.playInvalid();
+            spawnFloatingText(LOGICAL_W / 2, 185, '⚠️ FIDE 摸子走子規則已開啟：觸摸後必須移動該棋子！', '#fde047', 16);
+            return;
+          }
+          state.selected = null;
+          state.legalMoves = [];
+          state.blockedMoves = [];
+          state.warningLine = null;
+          sfx.playCancel();
+          return;
+        }
+        sfx.playSelect();
+        if (btn.action === 'START_NORMAL') resetGame('AI', 'normal');
+        else if (btn.action === 'START_HARD') resetGame('AI', 'hard');
+        else if (btn.action === 'START_PVP') resetGame('PVP', 'normal');
+        else if (btn.action === 'HELP') state.screen = 'HELP';
+        else if (btn.action === 'MENU') state.screen = 'MENU';
+        else if (btn.action === 'RESTART') resetGame(state.mode, state.difficulty);
+        else if (btn.action === 'UNDO') handleUndo();
+        return;
+      }
+    }
+
+    if (state.screen !== 'PLAYING') return;
+    if (state.moveAnim || state.battleAnim || state.aiThinking || state.pendingPromotion) return;
+    if (state.mode === 'AI' && state.turn !== SIDE_RED) return;
+
+    const cell = pixelToGrid(pt.x, pt.y);
+
+    if (!cell) {
+      if (state.selected) {
+        if (state.touchPieceRule && state.lockedPiecePos) {
+          sfx.playInvalid();
+          spawnFloatingText(LOGICAL_W / 2, 185, '⚠️ FIDE 摸子走子規則：該棋子有合法步，不可取消選取！', '#fde047', 16);
+          return;
+        }
+        state.selected = null;
+        state.legalMoves = [];
+        state.blockedMoves = [];
+        state.warningLine = null;
+        sfx.playCancel();
+      }
+      return;
+    }
+
+    if (state.selected) {
+      if (state.selected.r === cell.r && state.selected.c === cell.c) {
+        if (state.touchPieceRule && state.lockedPiecePos) {
+          sfx.playInvalid();
+          spawnFloatingText(LOGICAL_W / 2, 185, '⚠️ FIDE 摸子走子規則：已觸摸此棋子，請選擇綠色落點行棋！', '#fde047', 16);
+          return;
+        }
+        state.selected = null;
+        state.legalMoves = [];
+        state.blockedMoves = [];
+        state.warningLine = null;
+        sfx.playCancel();
+        return;
+      }
+
+      const chosenMove = state.legalMoves.find(m => m.tr === cell.r && m.tc === cell.c);
+      if (chosenMove) {
+        // 若是玩家士兵抵達底線，彈出 FIDE 升變四選一視窗 (皇后/城堡/主教/騎士)
+        if (chosenMove.needsPromotionChoice) {
+          state.pendingPromotion = {
+            move: chosenMove,
+            side: state.turn
+          };
+          sfx.playSelect();
+          return;
+        }
+        executeMove(chosenMove);
+        return;
+      }
+
+      const pinnedMove = (state.blockedMoves || []).find(m => m.tr === cell.r && m.tc === cell.c);
+      if (pinnedMove && pinnedMove.exposure) {
+        sfx.playInvalid();
+        const pos = gridToPixel(cell.r, cell.c);
+        spawnFloatingText(LOGICAL_W / 2, pos.y - 24, pinnedMove.exposure.text, '#ff4d6d', 17);
+        state.warningLine = {
+          from: pinnedMove.exposure.threatPos,
+          to: pinnedMove.exposure.kingPos,
+          timer: 2.2
+        };
+        return;
+      }
+    }
+
+    const clickedPiece = state.board[cell.r][cell.c];
+    if (clickedPiece && clickedPiece.side === state.turn) {
+      // 若開啟 FIDE 摸子走子規則且已鎖定另一顆具有合法步的棋子，禁止切換選取別顆棋子
+      if (
+        state.touchPieceRule &&
+        state.lockedPiecePos &&
+        (state.lockedPiecePos.r !== cell.r || state.lockedPiecePos.c !== cell.c)
+      ) {
+        const lockedP = state.board[state.lockedPiecePos.r][state.lockedPiecePos.c];
+        const lockedName = lockedP ? PIECE_NAMES[lockedP.type] : '原棋子';
+        sfx.playInvalid();
+        spawnFloatingText(LOGICAL_W / 2, 185, `⚠️ FIDE 摸子走子：您已觸摸【${lockedName}】，必須走該棋子！`, '#fde047', 16);
+        return;
+      }
+
+      const moves = getLegalMovesForPiece(state.board, cell.r, cell.c, state.lastMove);
+      state.selected = { r: cell.r, c: cell.c };
+      state.legalMoves = moves;
+      state.blockedMoves = getPinnedBlockedMoves(state.board, cell.r, cell.c);
+      state.warningLine = null;
+      if (state.touchPieceRule && moves.length > 0) {
+        state.lockedPiecePos = { r: cell.r, c: cell.c };
+      }
+      sfx.playSelect();
+    } else if (clickedPiece && clickedPiece.side !== state.turn) {
+      sfx.playCancel();
+      const pos = gridToPixel(cell.r, cell.c);
+      if (state.selected) {
+        spawnFloatingText(pos.x, pos.y - 24, '此位置目前無法吃子', '#ff8b9c', 16);
+      } else {
+        spawnFloatingText(pos.x, pos.y - 24, '敵方棋子不可選取', '#ff8b9c', 16);
+      }
+    } else if (state.selected) {
+      if (state.touchPieceRule && state.lockedPiecePos) {
+        sfx.playInvalid();
+        spawnFloatingText(LOGICAL_W / 2, 185, '⚠️ FIDE 摸子走子規則：不可取消已觸摸且可移動的棋子！', '#fde047', 16);
+        return;
+      }
+      state.selected = null;
+      state.legalMoves = [];
+      state.blockedMoves = [];
+      state.warningLine = null;
+      sfx.playCancel();
+    }
+  });
+})();
+</script>
+</body>
+</html>
